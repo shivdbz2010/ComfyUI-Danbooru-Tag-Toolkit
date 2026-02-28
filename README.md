@@ -7,17 +7,31 @@ A refactored ComfyUI custom node toolkit for Danbooru tags.
 `ComfyUI-Danbooru-Tag-Toolkit` helps you sort, select, and export Danbooru tags with a cleaner workflow:
 
 - Sort tags into custom categories from Excel/CSV mappings
-- Select tags by category with an integrated visual selector
-- Keep workflow-compatible packer/extractor style nodes
+- Select tags by category with a visual selector
+- Use either split workflow (recommended) or all-in-one workflow
 - Support cache preview and one-click cache clear
 
 ## Included Nodes
 
-- `DanbooruTagSorterNode` - Sort tags into mapped categories (Packer)
-- `DanbooruTagGetterNode` - Extract sorted category outputs (Extractor)
-- `DanbooruTagSelectorNode` - Visual tag/category selector (Picker)
+- `DanbooruTagSorterNode` - Split Step 1: sort tags into mapped categories
+- `DanbooruTagSelectorNode` - Split Step 2: visual tag/category selector
 - `DanbooruTagSorterSelectorNode` - All-in-one sorter + selector
+- `DanbooruTagGetterNode` - Legacy extractor node (optional, backward compatibility)
 - `DanbooruTagClearCacheNode` - Clear runtime cache
+
+## Recommended Workflows
+
+### Split Workflow (Recommended)
+
+1. Connect your prompt/tags source to `DanbooruTagSorterNode`.
+2. Connect `TAG_BUNDLE` from sorter to `DanbooruTagSelectorNode`.
+3. Use selector outputs:
+   - `SELECTED_TAGS`
+   - `SELECTED_WITH_PREFIX`
+
+### All-in-One Workflow
+
+Use `DanbooruTagSorterSelectorNode` if you prefer a single node that combines sorting and selection.
 
 ## Installation
 

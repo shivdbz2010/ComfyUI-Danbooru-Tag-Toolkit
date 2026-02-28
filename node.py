@@ -699,7 +699,7 @@ class DanbooruTagSorterNode:
     RETURN_TYPES = ("TAG_BUNDLE", "STRING")
     RETURN_NAMES = ("分类数据包", "ALL_TAGS")
     FUNCTION = "process"
-    CATEGORY = "Danbooru Toolkit"
+    CATEGORY = "Danbooru Toolkit/Split"
 
     def process(
         self,
@@ -744,7 +744,7 @@ class DanbooruTagGetterNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Tag String",)
     FUNCTION = "get_tag"
-    CATEGORY = "Danbooru Toolkit"
+    CATEGORY = "Danbooru Toolkit/Legacy"
 
     def get_tag(self, tag_bundle, category_name):
         # 防止空输入崩溃
@@ -785,7 +785,7 @@ class DanbooruTagSelectorNode:
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("SELECTED_TAGS", "SELECTED_WITH_PREFIX")
     FUNCTION = "select_tags"
-    CATEGORY = "Danbooru Toolkit"
+    CATEGORY = "Danbooru Toolkit/Split"
 
     @staticmethod
     def _join_tags(tags: List[str], separator: str, keep_trailing_comma: bool) -> str:
@@ -904,7 +904,7 @@ class DanbooruTagSorterSelectorNode:
     RETURN_TYPES = ("TAG_BUNDLE", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("分类数据包", "SELECTED_TAGS", "SELECTED_WITH_PREFIX", "ALL_TAGS")
     FUNCTION = "process_and_select"
-    CATEGORY = "Danbooru Toolkit"
+    CATEGORY = "Danbooru Toolkit/Integrated"
 
     def process_and_select(
         self,
@@ -978,7 +978,7 @@ class DanbooruTagClearCacheNode:
 
     RETURN_TYPES = ()
     FUNCTION = "clear_cache"
-    CATEGORY = "Danbooru Toolkit"
+    CATEGORY = "Danbooru Toolkit/Utils"
     OUTPUT_NODE = True
 
     def clear_cache(self):
@@ -1066,9 +1066,9 @@ NODE_CLASS_MAPPINGS = {
     "DanbooruTagClearCacheNode": DanbooruTagClearCacheNode
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DanbooruTagSorterNode": "Danbooru Tag Toolkit - Sorter (Packer)",
-    "DanbooruTagGetterNode": "Danbooru Tag Toolkit - Getter (Extractor)",
-    "DanbooruTagSelectorNode": "Danbooru Tag Toolkit - Selector (Picker)",
+    "DanbooruTagSorterNode": "Danbooru Tag Toolkit - Split Step 1 (Sorter)",
+    "DanbooruTagGetterNode": "Danbooru Tag Toolkit - Getter (Legacy)",
+    "DanbooruTagSelectorNode": "Danbooru Tag Toolkit - Split Step 2 (Selector)",
     "DanbooruTagSorterSelectorNode": "Danbooru Tag Toolkit - All-in-One",
     "DanbooruTagClearCacheNode": "Danbooru Tag Toolkit - Clear Cache"
 }
