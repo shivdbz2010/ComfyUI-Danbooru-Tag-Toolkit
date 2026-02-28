@@ -2042,9 +2042,9 @@ function syncSettingsFromWidgets(node) {
 app.registerExtension({
     name: EXT_NAME,
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "DanbooruTagSelectorNode" && nodeData.name !== "DanbooruTagSorterSelectorNode") return;
+        if (nodeData.name !== "DanbooruTagSorterSelectorNode") return;
 
-        const isIntegratedNode = nodeData.name === "DanbooruTagSorterSelectorNode";
+        const isIntegratedNode = true;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

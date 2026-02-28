@@ -5,8 +5,14 @@ import ast
 import hashlib
 import json
 import re
+import io
+import time
+import urllib.parse
+import urllib.request
 import torch
 import comfy
+import numpy as np
+from PIL import Image
 from typing import Dict, List, Any
 
 try:
@@ -18,6 +24,13 @@ except Exception:
 
 _tag_cache = {}
 _latest_tag_bundle_by_node: Dict[str, Dict[str, List[str]]] = {}
+_gallery_post_cache: Dict[str, Dict[str, Any]] = {}
+_gallery_image_cache: Dict[str, Dict[str, Any]] = {}
+
+_DANBOORU_BASE_URL = "https://danbooru.donmai.us"
+_GALLERY_POST_CACHE_TTL = 120
+_GALLERY_POST_CACHE_LIMIT = 128
+_GALLERY_IMAGE_CACHE_LIMIT = 64
 SEPARATOR_OPTIONS = ["comma", "newline", "space", True, False, "True", "False", "true", "false"]
 
 
@@ -468,6 +481,134 @@ def _select_from_bundle(
     return selected_text, normalized_bundle
 
 
+def _empty_image_tensor() -> torch.Tensor:
+    return torch.zeros(1, 1, 1, 3)
+
+
+def _absolutize_danbooru_url(raw_url: Any) -> str:
+    text = str(raw_url or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return "https:" + text
+    if text.startswith("/"):
+        return _DANBOORU_BASE_URL + text
+    return text
+
+
+def _tag_string_to_prompt(tag_string: Any) -> str:
+    tokens = [t.strip() for t in str(tag_string or "").split(" ") if t.strip()]
+    if not tokens:
+        return ""
+    return ", ".join(t.replace("_", " ") for t in tokens)
+
+
+def _evict_oldest_cache_item(cache_dict: Dict[str, Any], max_items: int):
+    if len(cache_dict) < max_items:
+        return
+    oldest_key = min(cache_dict.keys(), key=lambda k: cache_dict[k].get("ts", 0))
+    cache_dict.pop(oldest_key, None)
+
+
+def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") -> List[Dict[str, Any]]:
+    rating_value = str(rating or "all").strip().lower()
+    tag_parts = [str(tags or "").strip()]
+    if rating_value and rating_value != "all":
+        tag_parts.append(f"rating:{rating_value}")
+    final_tags = " ".join([p for p in tag_parts if p]).strip()
+
+    cache_key = f"{final_tags}|{limit}|{page}"
+    now = time.time()
+    cached = _gallery_post_cache.get(cache_key)
+    if cached and (now - cached.get("ts", 0) <= _GALLERY_POST_CACHE_TTL):
+        return cached.get("posts", [])
+
+    query = urllib.parse.urlencode({
+        "tags": final_tags,
+        "limit": int(limit),
+        "page": int(page),
+    })
+    api_url = f"{_DANBOORU_BASE_URL}/posts.json?{query}"
+
+    with urllib.request.urlopen(api_url, timeout=15) as response:
+        payload = response.read().decode("utf-8", errors="replace")
+    parsed = json.loads(payload)
+    if not isinstance(parsed, list):
+        return []
+
+    posts: List[Dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+
+        post_id = item.get("id")
+        tag_string = str(item.get("tag_string", "") or "")
+        prompt = _tag_string_to_prompt(tag_string)
+
+        preview_url = _absolutize_danbooru_url(item.get("preview_file_url"))
+        image_url = _absolutize_danbooru_url(item.get("large_file_url"))
+        if not image_url:
+            image_url = _absolutize_danbooru_url(item.get("file_url"))
+        if not image_url:
+            image_url = preview_url
+
+        posts.append({
+            "id": post_id,
+            "preview_url": preview_url,
+            "image_url": image_url,
+            "tag_string": tag_string,
+            "prompt": prompt,
+            "score": item.get("score", 0),
+            "rating": item.get("rating", ""),
+        })
+
+    _evict_oldest_cache_item(_gallery_post_cache, _GALLERY_POST_CACHE_LIMIT)
+    _gallery_post_cache[cache_key] = {
+        "ts": now,
+        "posts": posts,
+    }
+    return posts
+
+
+def _load_gallery_image_tensor(image_url: str) -> torch.Tensor:
+    final_url = _absolutize_danbooru_url(image_url)
+    if not final_url:
+        return _empty_image_tensor()
+
+    cached = _gallery_image_cache.get(final_url)
+    if isinstance(cached, dict):
+        tensor = cached.get("tensor")
+        if tensor is not None:
+            return tensor
+
+    with urllib.request.urlopen(final_url, timeout=20) as response:
+        image_bytes = response.read()
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_arr = np.array(image).astype(np.float32) / 255.0
+    image_tensor = torch.from_numpy(image_arr)[None,]
+
+    _evict_oldest_cache_item(_gallery_image_cache, _GALLERY_IMAGE_CACHE_LIMIT)
+    _gallery_image_cache[final_url] = {
+        "ts": time.time(),
+        "tensor": image_tensor,
+    }
+    return image_tensor
+
+
+def _get_cached_gallery_image_tensor(image_url: str) -> torch.Tensor:
+    final_url = _absolutize_danbooru_url(image_url)
+    if not final_url:
+        return _empty_image_tensor()
+
+    cached = _gallery_image_cache.get(final_url)
+    if isinstance(cached, dict):
+        tensor = cached.get("tensor")
+        if tensor is not None:
+            return tensor
+
+    return _load_gallery_image_tensor(final_url)
+
+
 # Sorter类
 class DanbooruTagSorter:
     def __init__(self, excel_path, category_mapping, new_category_order, default_category="未归类词"):
@@ -662,193 +803,6 @@ class DanbooruTagSorter:
         return "\n".join(final_lines), categorized_tags
 
 
-# ComfyUI
-class DanbooruTagSorterNode:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "tags": ("STRING", {"multiline": True, "default": "", "placeholder": "1girl, solo..."}),
-            },
-            "optional": {
-                "excel_file": ("STRING", {"multiline": False, "default": "danbooru_tags.xlsx"}),
-                "category_mapping": ("STRING", {
-                    "multiline": True,
-                    "default": DEFAULT_MAPPING_TEXT,
-                    "placeholder": CATEGORY_MAPPING_PLACEHOLDER
-                }),
-                "new_category_order": ("STRING", {
-                    "multiline": True,
-                    "default": DEFAULT_ORDER_TEXT,
-                    "placeholder": CATEGORY_ORDER_PLACEHOLDER
-                }),
-                "default_category": ("STRING", {"default": "未归类词"}),
-                "regex_blacklist": ("STRING", {"default": ""}),
-                "tag_blacklist": ("STRING", {
-                    "multiline": True,
-                    "default": "",
-                    "placeholder": "这里输入不想输出的tag喵...基础语法是 “tag1, tag2,” 喵..."
-                }),
-                "deduplicate_tags": ("BOOLEAN", {"default": False, "label": "自动去重"}),
-                "validation": ("BOOLEAN", {"default": True, "label": "配置校验"}),
-                "force_reload": ("BOOLEAN", {"default": False, "label": "强制重载"}),
-                "is_comment": ("BOOLEAN", {"default": True, "label": "保留注释"}),
-            }
-        }
-
-    RETURN_TYPES = ("TAG_BUNDLE", "STRING")
-    RETURN_NAMES = ("分类数据包", "ALL_TAGS")
-    FUNCTION = "process"
-    CATEGORY = "Danbooru Toolkit/Split"
-
-    def process(
-        self,
-        tags,
-        excel_file="danbooru_tags.xlsx",
-        category_mapping="",
-        new_category_order="",
-        default_category="未归类词",
-        regex_blacklist="",
-        tag_blacklist="",
-        deduplicate_tags=False,
-        validation=True,
-        force_reload=False,
-        is_comment=True,
-    ):
-        all_str, cat_dict, _, _, _ = _execute_sorting(
-            tags=tags,
-            excel_file=excel_file,
-            category_mapping=category_mapping,
-            new_category_order=new_category_order,
-            default_category=default_category,
-            regex_blacklist=regex_blacklist,
-            tag_blacklist=tag_blacklist,
-            deduplicate_tags=deduplicate_tags,
-            validation=validation,
-            force_reload=force_reload,
-            is_comment=is_comment,
-        )
-        return (cat_dict, all_str)
-
-# Getter
-class DanbooruTagGetterNode:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "tag_bundle": ("TAG_BUNDLE",),
-                "category_name": ("STRING", {"default": "角色特征词", "multiline": False}),
-            }
-        }
-
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("Tag String",)
-    FUNCTION = "get_tag"
-    CATEGORY = "Danbooru Toolkit/Legacy"
-
-    def get_tag(self, tag_bundle, category_name):
-        # 防止空输入崩溃
-        if not tag_bundle or not isinstance(tag_bundle, dict):
-            return ("",)
-        return (tag_bundle.get(category_name.strip(), ""),)
-
-
-class DanbooruTagSelectorNode:
-    """
-    可视化多选标签节点：
-    - 输入 TAG_BUNDLE
-    - 前端点击选择/多选并支持拖拽排序
-    - 输出合并后的标签字符串
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "tag_bundle": ("TAG_BUNDLE",),
-            },
-            "optional": {
-                "prefix_text": ("STRING", {"default": "", "multiline": True}),
-                "separator": (SEPARATOR_OPTIONS, {"default": "comma"}),
-                "use_all_when_empty": ("BOOLEAN", {"default": True, "label": "空选时输出全部"}),
-                "deduplicate_selected": ("BOOLEAN", {"default": True, "label": "选择结果去重"}),
-                "keep_trailing_comma": ("BOOLEAN", {"default": True, "label": "尾部逗号"}),
-                # 用 optional + 前端隐藏，确保会随 workflow 序列化并传入后端
-                "selected_tags_json": ("STRING", {"default": "[]", "multiline": True}),
-                "selected_categories_json": ("STRING", {"default": "[]", "multiline": True}),
-            },
-            "hidden": {
-                "unique_id": "UNIQUE_ID",
-            },
-        }
-
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("SELECTED_TAGS", "SELECTED_WITH_PREFIX")
-    FUNCTION = "select_tags"
-    CATEGORY = "Danbooru Toolkit/Split"
-
-    @staticmethod
-    def _join_tags(tags: List[str], separator: str, keep_trailing_comma: bool) -> str:
-        if not tags:
-            return ""
-
-        sep_map = {
-            "comma": ", ",
-            "newline": "\n",
-            "space": " ",
-        }
-        joiner = sep_map.get(separator, ", ")
-        merged = joiner.join(tags)
-
-        if keep_trailing_comma:
-            if separator == "newline":
-                return merged + "\n"
-            if separator == "space":
-                return merged + " "
-            return merged + ", "
-        return merged
-
-    def select_tags(
-        self,
-        tag_bundle,
-        prefix_text="",
-        separator="comma",
-        use_all_when_empty=True,
-        deduplicate_selected=True,
-        keep_trailing_comma=True,
-        selected_tags_json="[]",
-        selected_categories_json="[]",
-        unique_id=None,
-    ):
-        selected_text, normalized_bundle = _select_from_bundle(
-            tag_bundle=tag_bundle,
-            selected_tags_json=selected_tags_json,
-            selected_categories_json=selected_categories_json,
-            separator=separator,
-            use_all_when_empty=use_all_when_empty,
-            deduplicate_selected=deduplicate_selected,
-            keep_trailing_comma=keep_trailing_comma,
-        )
-
-        if unique_id is not None:
-            _latest_tag_bundle_by_node[str(unique_id)] = normalized_bundle
-
-        prefix_text = str(prefix_text or "").strip()
-        if prefix_text and selected_text:
-            if separator == "newline":
-                final_text = f"{prefix_text}\n{selected_text}"
-            elif separator == "space":
-                final_text = f"{prefix_text} {selected_text}"
-            else:
-                final_text = f"{prefix_text}, {selected_text}"
-        elif prefix_text:
-            final_text = prefix_text
-        else:
-            final_text = selected_text
-
-        return (selected_text, final_text)
-
-
 class DanbooruTagSorterSelectorNode:
     """
     一体式节点：
@@ -901,8 +855,8 @@ class DanbooruTagSorterSelectorNode:
             },
         }
 
-    RETURN_TYPES = ("TAG_BUNDLE", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("分类数据包", "SELECTED_TAGS", "SELECTED_WITH_PREFIX", "ALL_TAGS")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("SELECTED_TAGS", "SELECTED_WITH_PREFIX", "ALL_TAGS")
     FUNCTION = "process_and_select"
     CATEGORY = "Danbooru Toolkit/Integrated"
 
@@ -968,25 +922,78 @@ class DanbooruTagSorterSelectorNode:
         else:
             final_text = selected_text
 
-        return (cat_dict, selected_text, final_text, all_str)
+        return (selected_text, final_text, all_str)
 
 
-# 手动清除缓存
-class DanbooruTagClearCacheNode:
+class DanbooruTagGalleryLiteNode:
     @classmethod
-    def INPUT_TYPES(cls): return {"required": {}}
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {},
+            "hidden": {
+                "selection_data": ("STRING", {"default": "{}", "multiline": True, "forceInput": True}),
+            },
+        }
 
-    RETURN_TYPES = ()
-    FUNCTION = "clear_cache"
-    CATEGORY = "Danbooru Toolkit/Utils"
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "prompts")
+    OUTPUT_IS_LIST = (True, True)
+    FUNCTION = "get_selected_data"
+    CATEGORY = "Danbooru Toolkit/Gallery"
     OUTPUT_NODE = True
 
-    def clear_cache(self):
-        global _tag_cache
-        _tag_cache.clear()
-        _latest_tag_bundle_by_node.clear()
-        print("缓存已经清除了喵...")
-        return ()
+    @classmethod
+    def IS_CHANGED(cls, selection_data="{}", **kwargs):
+        return selection_data
+
+    def get_selected_data(self, selection_data="{}", **kwargs):
+        if not selection_data or selection_data == "{}":
+            return ([_empty_image_tensor()], [""])
+
+        try:
+            payload = json.loads(selection_data)
+        except Exception:
+            return ([_empty_image_tensor()], [""])
+
+        if not isinstance(payload, dict):
+            return ([_empty_image_tensor()], [""])
+
+        selections = payload.get("selections", [])
+        if not isinstance(selections, list) or not selections:
+            return ([_empty_image_tensor()], [""])
+
+        images: List[torch.Tensor] = []
+        prompts: List[str] = []
+
+        for item in selections:
+            if not isinstance(item, dict):
+                continue
+
+            prompt = str(item.get("prompt", "") or "").strip()
+            if not prompt:
+                prompt = _tag_string_to_prompt(item.get("tag_string", ""))
+            prompts.append(prompt)
+
+            image_url = str(item.get("image_url", "") or "").strip()
+            if not image_url:
+                image_url = str(item.get("preview_url", "") or "").strip()
+
+            if not image_url:
+                images.append(_empty_image_tensor())
+                continue
+
+            try:
+                images.append(_get_cached_gallery_image_tensor(image_url))
+            except Exception as e:
+                print(f"[DanbooruTagToolkit] Gallery image load failed: {image_url} ({e})")
+                images.append(_empty_image_tensor())
+
+        if not images:
+            return ([_empty_image_tensor()], [""])
+        if not prompts:
+            prompts = ["" for _ in images]
+        return (images, prompts)
 
 
 # Selector 前端拉取最新 TAG_BUNDLE 的 API
@@ -1053,24 +1060,50 @@ if PromptServer is not None and web is not None:
                     "categories": {},
                     "all_tags": "",
                 }, status=500)
+
+        @PromptServer.instance.routes.get("/danbooru_tag_gallery/posts")
+        async def get_posts_for_gallery(request):
+            try:
+                tags = str(request.query.get("tags", "")).strip()
+                rating = str(request.query.get("rating", "all")).strip().lower()
+
+                try:
+                    limit = int(request.query.get("limit", 20))
+                except Exception:
+                    limit = 20
+                try:
+                    page = int(request.query.get("page", 1))
+                except Exception:
+                    page = 1
+
+                limit = max(1, min(limit, 100))
+                page = max(1, min(page, 1000))
+
+                posts = _fetch_gallery_posts(tags=tags, limit=limit, page=page, rating=rating)
+                return web.json_response({
+                    "status": "success",
+                    "posts": posts,
+                    "count": len(posts),
+                })
+            except Exception as e:
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e),
+                    "posts": [],
+                    "count": 0,
+                }, status=500)
     except Exception as e:
         print(f"[DanbooruTagToolkit] selector API 注册失败: {e}")
 
 
 # Registration 我的回合！注册！
 NODE_CLASS_MAPPINGS = {
-    "DanbooruTagSorterNode": DanbooruTagSorterNode,
-    "DanbooruTagGetterNode": DanbooruTagGetterNode,
-    "DanbooruTagSelectorNode": DanbooruTagSelectorNode,
     "DanbooruTagSorterSelectorNode": DanbooruTagSorterSelectorNode,
-    "DanbooruTagClearCacheNode": DanbooruTagClearCacheNode
+    "DanbooruTagGalleryLiteNode": DanbooruTagGalleryLiteNode,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DanbooruTagSorterNode": "Danbooru Tag Toolkit - Split Step 1 (Sorter)",
-    "DanbooruTagGetterNode": "Danbooru Tag Toolkit - Getter (Legacy)",
-    "DanbooruTagSelectorNode": "Danbooru Tag Toolkit - Split Step 2 (Selector)",
     "DanbooruTagSorterSelectorNode": "Danbooru Tag Toolkit - All-in-One",
-    "DanbooruTagClearCacheNode": "Danbooru Tag Toolkit - Clear Cache"
+    "DanbooruTagGalleryLiteNode": "Danbooru Tag Toolkit - Danbooru Gallery Lite",
 }
 
 # 都看到这里了球球给我点点Star吧...(哭
