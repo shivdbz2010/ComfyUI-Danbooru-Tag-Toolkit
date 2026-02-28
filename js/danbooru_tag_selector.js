@@ -776,6 +776,56 @@ function readLinkField(linkRecord, objectKey, arrayIndex) {
     return null;
 }
 
+function tagsSpaceToCommaPrompt(tagString) {
+    return String(tagString || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .join(", ");
+}
+
+function extractPromptFromSelectionData(rawValue) {
+    if (typeof rawValue !== "string" || !rawValue.trim()) return "";
+    try {
+        const data = JSON.parse(rawValue);
+        const prompts = [];
+        const collectPrompt = item => {
+            if (!item || typeof item !== "object") return "";
+            const p = String(item.prompt || "").trim();
+            if (p) {
+                prompts.push(p);
+                return;
+            }
+            const t = String(item.tags || item.tag_string || "").trim();
+            if (t) {
+                prompts.push(tagsSpaceToCommaPrompt(t));
+            }
+        };
+
+        if (Array.isArray(data)) {
+            data.forEach(collectPrompt);
+            return prompts.join(", ");
+        }
+
+        if (data && typeof data === "object") {
+            if (Array.isArray(data.selections)) {
+                data.selections.forEach(collectPrompt);
+                return prompts.join(", ");
+            }
+            collectPrompt(data);
+            return prompts.join(", ");
+        }
+    } catch {
+        // ignore json parse errors
+    }
+    return "";
+}
+
+function looksLikeJsonText(text) {
+    const t = String(text || "").trim();
+    return t.startsWith("{") || t.startsWith("[");
+}
+
 function getLinkedStringValue(node, inputName) {
     const input = getInputSlot(node, inputName);
     if (!input || input.link == null) return null;
@@ -787,6 +837,13 @@ function getLinkedStringValue(node, inputName) {
     const originNode = app.graph?.getNodeById?.(originId);
     if (!originNode) return null;
 
+    // 优先读取 Gallery/类似节点的 selection_data，避免误读 gallery_posts_json（整页数据）。
+    const selectionWidget = originNode.widgets?.find(w => w?.name === "selection_data");
+    if (typeof selectionWidget?.value === "string") {
+        // For gallery-like nodes, always trust selection_data (including empty).
+        return extractPromptFromSelectionData(selectionWidget.value);
+    }
+
     const preferredNames = ["string", "text", "prompt", "value", "tags"];
     for (const name of preferredNames) {
         const widget = originNode.widgets?.find(w => w?.name === name);
@@ -795,10 +852,24 @@ function getLinkedStringValue(node, inputName) {
         }
     }
 
+    const blockedNames = new Set([
+        "selection_data",
+        "gallery_state_json",
+        "gallery_posts_json",
+        "filter_data",
+        "selected_tags_json",
+        "selected_categories_json",
+    ]);
+
     let longest = "";
     for (const widget of originNode.widgets || []) {
-        if (typeof widget?.value === "string" && widget.value.length > longest.length) {
-            longest = widget.value;
+        const name = String(widget?.name || "").toLowerCase();
+        if (blockedNames.has(name)) continue;
+        if (typeof widget?.value !== "string") continue;
+        const value = String(widget.value || "");
+        if (!value.trim() || looksLikeJsonText(value)) continue;
+        if (value.length > longest.length) {
+            longest = value;
         }
     }
     return longest || null;

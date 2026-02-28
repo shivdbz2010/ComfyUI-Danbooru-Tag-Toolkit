@@ -26,11 +26,17 @@ _tag_cache = {}
 _latest_tag_bundle_by_node: Dict[str, Dict[str, List[str]]] = {}
 _gallery_post_cache: Dict[str, Dict[str, Any]] = {}
 _gallery_image_cache: Dict[str, Dict[str, Any]] = {}
+_gallery_autocomplete_cache: Dict[str, Dict[str, Any]] = {}
 
 _DANBOORU_BASE_URL = "https://danbooru.donmai.us"
 _GALLERY_POST_CACHE_TTL = 120
 _GALLERY_POST_CACHE_LIMIT = 128
-_GALLERY_IMAGE_CACHE_LIMIT = 64
+_GALLERY_IMAGE_CACHE_TTL = 180
+_GALLERY_IMAGE_CACHE_LIMIT = 24
+# 0 = unlimited (multi-select friendly)
+_GALLERY_OUTPUT_SELECTION_LIMIT = 0
+_GALLERY_AUTOCOMPLETE_CACHE_TTL = 300
+_GALLERY_AUTOCOMPLETE_CACHE_LIMIT = 256
 SEPARATOR_OPTIONS = ["comma", "newline", "space", True, False, "True", "False", "true", "false"]
 
 
@@ -176,7 +182,7 @@ def _extract_tags_text_from_payload(raw_value: Any, depth: int = 0) -> str:
             pass
 
         # 兜底：字符串里夹了 JSON 片段时，尝试提取常见字段。
-        for key in ("tags", "tag_string", "prompt", "caption", "text"):
+        for key in ("prompt", "tags", "tag_string", "caption", "text"):
             pattern = re.compile(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', re.IGNORECASE | re.DOTALL)
             match = pattern.search(text)
             if not match:
@@ -189,7 +195,17 @@ def _extract_tags_text_from_payload(raw_value: Any, depth: int = 0) -> str:
         return text
 
     if isinstance(raw_value, dict):
-        for key in ("tags", "tag_string", "prompt", "caption", "text"):
+        # Gallery 选择项通常同时包含 tag_string/prompt，这里必须优先用 prompt，
+        # 否则会把整条空格分隔 tag_string 当成一个“未归类词”。
+        if any(key in raw_value for key in ("post_id", "image_url", "preview_url", "md5")):
+            for key in ("prompt", "tags", "tag_string", "caption", "text"):
+                if key not in raw_value:
+                    continue
+                extracted = _extract_tags_text_from_payload(raw_value.get(key), depth + 1)
+                if extracted:
+                    return extracted
+
+        for key in ("tags", "prompt", "tag_string", "caption", "text"):
             if key not in raw_value:
                 continue
             extracted = _extract_tags_text_from_payload(raw_value.get(key), depth + 1)
@@ -198,6 +214,18 @@ def _extract_tags_text_from_payload(raw_value: Any, depth: int = 0) -> str:
 
         selections = raw_value.get("selections")
         if isinstance(selections, list):
+            # 兼容 Gallery payload：selections 里如果是图片选择项，默认只取最后一个，
+            # 避免把整页历史选择合并成一大串标签。
+            gallery_like = all(
+                isinstance(item, dict) and any(k in item for k in ("post_id", "image_url", "preview_url"))
+                for item in selections
+            ) if selections else False
+            if gallery_like:
+                for item in reversed(selections):
+                    extracted = _extract_tags_text_from_payload(item, depth + 1)
+                    if extracted:
+                        return extracted
+
             chunks: List[str] = []
             for item in selections:
                 extracted = _extract_tags_text_from_payload(item, depth + 1)
@@ -503,14 +531,42 @@ def _tag_string_to_prompt(tag_string: Any) -> str:
     return ", ".join(t.replace("_", " ") for t in tokens)
 
 
+def _guess_file_ext_from_url(url: Any) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(text)
+        _, ext = os.path.splitext(parsed.path or "")
+        return ext.lower().lstrip(".")
+    except Exception:
+        return ""
+
+
 def _evict_oldest_cache_item(cache_dict: Dict[str, Any], max_items: int):
+    if max_items <= 0:
+        cache_dict.clear()
+        return
     if len(cache_dict) < max_items:
         return
     oldest_key = min(cache_dict.keys(), key=lambda k: cache_dict[k].get("ts", 0))
     cache_dict.pop(oldest_key, None)
 
 
+def _cleanup_expired_cache_items(cache_dict: Dict[str, Any], ttl_seconds: int):
+    if ttl_seconds <= 0 or not cache_dict:
+        return
+    now = time.time()
+    expired_keys = [
+        key for key, value in cache_dict.items()
+        if not isinstance(value, dict) or (now - float(value.get("ts", 0)) > ttl_seconds)
+    ]
+    for key in expired_keys:
+        cache_dict.pop(key, None)
+
+
 def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") -> List[Dict[str, Any]]:
+    allowed_image_ext = {"jpg", "jpeg", "png", "webp", "bmp", "tiff", "tif"}
     rating_value = str(rating or "all").strip().lower()
     tag_parts = [str(tags or "").strip()]
     if rating_value and rating_value != "all":
@@ -546,11 +602,20 @@ def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") 
         prompt = _tag_string_to_prompt(tag_string)
 
         preview_url = _absolutize_danbooru_url(item.get("preview_file_url"))
-        image_url = _absolutize_danbooru_url(item.get("large_file_url"))
+        if not preview_url:
+            continue
+
+        image_url = _absolutize_danbooru_url(item.get("file_url"))
         if not image_url:
-            image_url = _absolutize_danbooru_url(item.get("file_url"))
+            image_url = _absolutize_danbooru_url(item.get("large_file_url"))
         if not image_url:
             image_url = preview_url
+
+        file_ext = str(item.get("file_ext", "") or "").strip().lower()
+        if not file_ext:
+            file_ext = _guess_file_ext_from_url(image_url)
+        if file_ext and file_ext not in allowed_image_ext:
+            continue
 
         posts.append({
             "id": post_id,
@@ -560,6 +625,13 @@ def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") 
             "prompt": prompt,
             "score": item.get("score", 0),
             "rating": item.get("rating", ""),
+            "file_ext": file_ext,
+            "md5": item.get("md5", ""),
+            "tag_string_artist": str(item.get("tag_string_artist", "") or ""),
+            "tag_string_copyright": str(item.get("tag_string_copyright", "") or ""),
+            "tag_string_character": str(item.get("tag_string_character", "") or ""),
+            "tag_string_general": str(item.get("tag_string_general", "") or ""),
+            "tag_string_meta": str(item.get("tag_string_meta", "") or ""),
         })
 
     _evict_oldest_cache_item(_gallery_post_cache, _GALLERY_POST_CACHE_LIMIT)
@@ -570,15 +642,63 @@ def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") 
     return posts
 
 
+def _fetch_gallery_autocomplete(query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    text = str(query or "").strip().lower().replace(" ", "_")
+    if len(text) < 2:
+        return []
+
+    limit = max(1, min(int(limit), 50))
+    cache_key = f"{text}|{limit}"
+    now = time.time()
+    cached = _gallery_autocomplete_cache.get(cache_key)
+    if cached and (now - cached.get("ts", 0) <= _GALLERY_AUTOCOMPLETE_CACHE_TTL):
+        return cached.get("items", [])
+
+    params = urllib.parse.urlencode({
+        "search[name_matches]": f"{text}*",
+        "search[order]": "count",
+        "limit": limit,
+    })
+    api_url = f"{_DANBOORU_BASE_URL}/tags.json?{params}"
+
+    with urllib.request.urlopen(api_url, timeout=10) as response:
+        payload = response.read().decode("utf-8", errors="replace")
+    parsed = json.loads(payload)
+    if not isinstance(parsed, list):
+        return []
+
+    items: List[Dict[str, Any]] = []
+    for tag in parsed:
+        if not isinstance(tag, dict):
+            continue
+        name = str(tag.get("name", "") or "").strip()
+        if not name:
+            continue
+        items.append({
+            "name": name,
+            "post_count": int(tag.get("post_count", 0) or 0),
+            "category": int(tag.get("category", -1) or -1),
+        })
+
+    _evict_oldest_cache_item(_gallery_autocomplete_cache, _GALLERY_AUTOCOMPLETE_CACHE_LIMIT)
+    _gallery_autocomplete_cache[cache_key] = {
+        "ts": now,
+        "items": items,
+    }
+    return items
+
+
 def _load_gallery_image_tensor(image_url: str) -> torch.Tensor:
     final_url = _absolutize_danbooru_url(image_url)
     if not final_url:
         return _empty_image_tensor()
 
+    _cleanup_expired_cache_items(_gallery_image_cache, _GALLERY_IMAGE_CACHE_TTL)
     cached = _gallery_image_cache.get(final_url)
     if isinstance(cached, dict):
         tensor = cached.get("tensor")
         if tensor is not None:
+            cached["ts"] = time.time()
             return tensor
 
     with urllib.request.urlopen(final_url, timeout=20) as response:
@@ -587,6 +707,7 @@ def _load_gallery_image_tensor(image_url: str) -> torch.Tensor:
     image_arr = np.array(image).astype(np.float32) / 255.0
     image_tensor = torch.from_numpy(image_arr)[None,]
 
+    _cleanup_expired_cache_items(_gallery_image_cache, _GALLERY_IMAGE_CACHE_TTL)
     _evict_oldest_cache_item(_gallery_image_cache, _GALLERY_IMAGE_CACHE_LIMIT)
     _gallery_image_cache[final_url] = {
         "ts": time.time(),
@@ -600,10 +721,12 @@ def _get_cached_gallery_image_tensor(image_url: str) -> torch.Tensor:
     if not final_url:
         return _empty_image_tensor()
 
+    _cleanup_expired_cache_items(_gallery_image_cache, _GALLERY_IMAGE_CACHE_TTL)
     cached = _gallery_image_cache.get(final_url)
     if isinstance(cached, dict):
         tensor = cached.get("tensor")
         if tensor is not None:
+            cached["ts"] = time.time()
             return tensor
 
     return _load_gallery_image_tensor(final_url)
@@ -705,6 +828,10 @@ class DanbooruTagSorter:
                      regex_blacklist="", tag_blacklist="",
                      deduplicate=False):
         raw_string = _extract_tags_text_from_payload(raw_string)
+        print(
+            f"[DanbooruTagToolkit] Sorter input debug: chars={len(raw_string)}, "
+            f"preview={raw_string[:120]!r}"
+        )
         # 拆分输入字符串转列表
         input_tags = [t.strip() for t in raw_string.split(',') if t.strip()]
 
@@ -956,12 +1083,29 @@ class DanbooruTagGalleryLiteNode:
         except Exception:
             return ([_empty_image_tensor()], [""])
 
-        if not isinstance(payload, dict):
+        selections: List[Dict[str, Any]] = []
+        if isinstance(payload, dict):
+            if isinstance(payload.get("selections"), list):
+                selections = [
+                    item for item in payload.get("selections", [])
+                    if isinstance(item, dict) and str(item.get("post_id", "")).strip()
+                ]
+            elif str(payload.get("post_id", "")).strip():
+                selections = [payload]
+        elif isinstance(payload, list):
+            selections = [
+                item for item in payload
+                if isinstance(item, dict) and str(item.get("post_id", "")).strip()
+            ]
+
+        if not selections:
             return ([_empty_image_tensor()], [""])
 
-        selections = payload.get("selections", [])
-        if not isinstance(selections, list) or not selections:
-            return ([_empty_image_tensor()], [""])
+        # 与参考节点默认单选体验保持一致：后端最终只输出最后一个选中项，
+        # 避免前端残留多选状态把整页 tag 一次性传给下游。
+        raw_count = len(selections)
+        if _GALLERY_OUTPUT_SELECTION_LIMIT > 0 and len(selections) > _GALLERY_OUTPUT_SELECTION_LIMIT:
+            selections = selections[-_GALLERY_OUTPUT_SELECTION_LIMIT:]
 
         images: List[torch.Tensor] = []
         prompts: List[str] = []
@@ -973,26 +1117,41 @@ class DanbooruTagGalleryLiteNode:
             prompt = str(item.get("prompt", "") or "").strip()
             if not prompt:
                 prompt = _tag_string_to_prompt(item.get("tag_string", ""))
-            prompts.append(prompt)
 
+            candidates: List[str] = []
             image_url = str(item.get("image_url", "") or "").strip()
-            if not image_url:
-                image_url = str(item.get("preview_url", "") or "").strip()
-
-            if not image_url:
-                images.append(_empty_image_tensor())
+            preview_url = str(item.get("preview_url", "") or "").strip()
+            if image_url:
+                candidates.append(image_url)
+            if preview_url:
+                candidates.append(preview_url)
+            if not candidates:
                 continue
 
-            try:
-                images.append(_get_cached_gallery_image_tensor(image_url))
-            except Exception as e:
-                print(f"[DanbooruTagToolkit] Gallery image load failed: {image_url} ({e})")
-                images.append(_empty_image_tensor())
+            loaded_tensor = None
+            for url in candidates:
+                try:
+                    loaded_tensor = _get_cached_gallery_image_tensor(url)
+                    break
+                except Exception:
+                    loaded_tensor = None
+
+            if loaded_tensor is None:
+                print(f"[DanbooruTagToolkit] Gallery item skipped (all image urls failed): {candidates}")
+                continue
+
+            images.append(loaded_tensor)
+            prompts.append(prompt)
 
         if not images:
             return ([_empty_image_tensor()], [""])
-        if not prompts:
-            prompts = ["" for _ in images]
+
+        first_prompt = prompts[0] if prompts else ""
+        print(
+            f"[DanbooruTagToolkit] Gallery output debug: raw_selections={raw_count}, "
+            f"used={len(selections)}, prompts_out={len(prompts)}, "
+            f"first_prompt_preview={first_prompt[:120]!r}"
+        )
         return (images, prompts)
 
 
@@ -1092,6 +1251,59 @@ if PromptServer is not None and web is not None:
                     "posts": [],
                     "count": 0,
                 }, status=500)
+
+        @PromptServer.instance.routes.get("/danbooru_tag_gallery/autocomplete")
+        async def get_autocomplete_for_gallery(request):
+            try:
+                query = str(request.query.get("q", "")).strip()
+                try:
+                    limit = int(request.query.get("limit", 20))
+                except Exception:
+                    limit = 20
+                limit = max(1, min(limit, 50))
+
+                items = _fetch_gallery_autocomplete(query=query, limit=limit)
+                return web.json_response({
+                    "status": "success",
+                    "items": items,
+                    "count": len(items),
+                })
+            except Exception as e:
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e),
+                    "items": [],
+                    "count": 0,
+                }, status=500)
+
+        @PromptServer.instance.routes.get("/danbooru_tag_gallery/cache/stats")
+        async def get_gallery_cache_stats(request):
+            _cleanup_expired_cache_items(_gallery_image_cache, _GALLERY_IMAGE_CACHE_TTL)
+            return web.json_response({
+                "status": "success",
+                "stats": {
+                    "post_cache": len(_gallery_post_cache),
+                    "image_cache": len(_gallery_image_cache),
+                    "autocomplete_cache": len(_gallery_autocomplete_cache),
+                    "image_cache_limit": _GALLERY_IMAGE_CACHE_LIMIT,
+                    "image_cache_ttl_sec": _GALLERY_IMAGE_CACHE_TTL,
+                },
+            })
+
+        @PromptServer.instance.routes.post("/danbooru_tag_gallery/cache/clear")
+        async def clear_gallery_cache(request):
+            _gallery_post_cache.clear()
+            _gallery_image_cache.clear()
+            _gallery_autocomplete_cache.clear()
+            return web.json_response({
+                "status": "success",
+                "message": "Gallery cache cleared.",
+                "stats": {
+                    "post_cache": 0,
+                    "image_cache": 0,
+                    "autocomplete_cache": 0,
+                },
+            })
     except Exception as e:
         print(f"[DanbooruTagToolkit] selector API 注册失败: {e}")
 
