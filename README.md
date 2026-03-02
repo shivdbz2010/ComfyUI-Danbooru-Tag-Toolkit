@@ -2,36 +2,38 @@
 
 Danbooru tag workflow tools for ComfyUI.
 
-This project provides:
-- an all-in-one node for tag sorting + visual selection
-- a lightweight Danbooru gallery node for selecting images and prompt lists
+## Highlights
 
-## Features
+- All-in-one Danbooru tag sorting + visual selection
+- Lightweight Danbooru gallery node (image + prompt list output)
+- Flexible category mapping and output order from Excel/CSV database
+- Works with both direct input tags and linked upstream prompt sources
 
-- Category-based tag sorting from Excel/CSV tag database
-- Fully configurable category mapping and output order
-- Visual picker for category/tag selection inside the node
-- Works with both direct text input and linked upstream tag sources
-- Danbooru gallery search with autocomplete
-- Multi-select output from gallery (`images` + `prompts` list)
-- Cache controls for gallery performance (`Clear Cache` button)
+## Screenshots
+
+### All-in-One + Gallery Workflow
+
+![Workflow Overview](example/20260302-102438.jpg)
+
+### Node UI in ComfyUI
+
+![Node UI](example/20260302-102453.jpg)
+
+## Example Workflow
+
+- JSON workflow file: [`example/example_worlflow.json`](example/example_worlflow.json)
 
 ## Included Nodes
 
 - `Danbooru Tag Toolkit - All-in-One` (`DanbooruTagSorterSelectorNode`)
-  - Outputs:
-  - `SELECTED_TAGS`
-  - `SELECTED_WITH_PREFIX`
-  - `ALL_TAGS`
+  - Outputs: `SELECTED_TAGS`, `SELECTED_WITH_PREFIX`, `ALL_TAGS`
 
 - `Danbooru Tag Toolkit - Danbooru Gallery Lite` (`DanbooruTagGalleryLiteNode`)
-  - Outputs:
-  - `images` (list)
-  - `prompts` (list)
+  - Outputs: `images` (list), `prompts` (list)
 
 ## Installation
 
-1. Copy this repository folder into your ComfyUI `custom_nodes` directory.
+1. Clone or copy this repo into ComfyUI `custom_nodes`.
 2. Install dependencies:
 
 ```bash
@@ -42,48 +44,32 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### 1) All-in-One Node
-
-1. Add `Danbooru Tag Toolkit - All-in-One`.
-2. Connect or type tags into `tags`.
-3. Click `Refresh` to preview categories.
-4. Select categories/tags in the UI.
-5. Use one of the three text outputs depending on your workflow.
-
-### 2) Gallery Lite Node
-
 1. Add `Danbooru Tag Toolkit - Danbooru Gallery Lite`.
-2. Search tags and click `Load`.
-3. Select cards:
-   - Click = single-select
-   - `Ctrl` / `Meta` / `Shift` + click = multi-select
-4. Run workflow to output selected `images` and `prompts` list.
-5. Use `Clear Cache` if you want to release gallery cache immediately.
+2. Search and select one or multiple posts in gallery.
+3. Connect gallery prompt output to `Danbooru Tag Toolkit - All-in-One` `tags` input.
+4. Click `Refresh` in All-in-One to preview categories from current selection.
+5. Select category rows/tags and use final text outputs.
 
-## Tag Database Format
+## Tag Database
 
-Default database file:
+Default file:
+
 - `tags_database/danbooru_tags.xlsx`
 
 Required columns:
+
 - `english`
 - `category`
 - `subcategory`
 
-You can use your own `.xlsx` or `.csv` file by setting `excel_file`.
+You can use custom `.xlsx`/`.csv` by setting `excel_file` in node settings.
 
-## Configuration Files
+## Configuration
 
 - `defaults_config.json`
-  - `mapping`: default category mapping entries
-  - `order`: default output category order
-
-## Notes
-
-- Gallery data is fetched from Danbooru API and requires network access.
-- Very large databases increase load time and memory usage.
-- The first database load is slower; following runs use in-process cache.
+  - `mapping`: default category mapping
+  - `order`: default category output order
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT. See `LICENSE`.
