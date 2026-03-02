@@ -433,9 +433,9 @@ function normalizePost(raw) {
         rating: String(post.rating ?? ""),
         file_ext: String(post.file_ext ?? ""),
         md5: String(post.md5 ?? ""),
+        display_url: String(post.display_url ?? ""),
         preview_url: String(post.preview_url ?? ""),
         image_url: String(post.image_url ?? ""),
-        display_url: String(post.display_url ?? ""),
         preview_width: Number(post.preview_width ?? 0),
         preview_height: Number(post.preview_height ?? 0),
         image_width: Number(post.image_width ?? 0),
@@ -582,7 +582,7 @@ app.registerExtension({
 
             const statusEl = document.createElement("div");
             statusEl.className = "dtg-status";
-            statusEl.textContent = "Enter tags and click Load. (build hf8)";
+            statusEl.textContent = "Enter tags and click Load. (build hf10)";
 
             const content = document.createElement("div");
             content.className = "dtg-content";
@@ -933,8 +933,8 @@ app.registerExtension({
 
                     const img = document.createElement("img");
                     img.className = "dtg-thumb";
-                    const primaryThumbUrl = post.display_url || post.preview_url || "";
-                    const fallbackThumbUrl = post.preview_url || "";
+                    const primaryThumbUrl = post.display_url || post.preview_url || post.image_url || "";
+                    const fallbackThumbUrl = post.preview_url || post.image_url || "";
                     img.src = primaryThumbUrl;
                     img.alt = String(post.id || "");
                     img.loading = "lazy";
@@ -979,8 +979,8 @@ app.registerExtension({
                         const prompt = buildPromptLikeReference(post, getSelectedCategories());
                         const payload = {
                             post_id: post.id,
+                            display_url: post.display_url || post.image_url || post.preview_url || "",
                             image_url: post.image_url || post.preview_url || "",
-                            display_url: post.display_url || post.preview_url || post.image_url || "",
                             preview_url: post.preview_url || "",
                             tag_string: post.tag_string || "",
                             tag_string_artist: post.tag_string_artist || "",

@@ -43,10 +43,24 @@ const I18N = {
         status_no_cached: "No cached category data yet. Run workflow once.",
         status_no_data: "No category data yet. Run workflow then refresh.",
         status_failed: "Failed to load categories.",
+        status_excel_files_loaded: "Detected {count} data files.",
+        status_excel_files_failed: "Failed to load data file list.",
+        status_profile_loaded: "Loaded profile: {name}",
+        status_profile_saved: "Saved profile: {name}",
+        status_profile_load_failed: "Failed to load profile.",
+        status_profile_save_failed: "Failed to save profile.",
         settings_title: "Node Settings",
         settings_sorter: "Sorter",
         settings_output: "Output",
         settings_excel: "Excel / CSV file",
+        settings_excel_reload: "Reload",
+        settings_profile: "Config profile",
+        settings_profile_reload: "Reload",
+        settings_profile_load: "Load",
+        settings_profile_save: "Save",
+        settings_profile_name: "Save as",
+        settings_profile_name_ph: "profile name",
+        settings_profile_none: "(none)",
         settings_mapping: "Category mapping",
         settings_order: "Category order",
         settings_default_category: "Default category",
@@ -103,10 +117,24 @@ const I18N = {
         status_no_cached: "暂无缓存分类数据，请先运行一次工作流。",
         status_no_data: "暂无分类数据，请先运行工作流后刷新。",
         status_failed: "加载分类失败。",
+        status_excel_files_loaded: "检测到 {count} 个数据文件。",
+        status_excel_files_failed: "加载数据文件列表失败。",
+        status_profile_loaded: "已加载配置: {name}",
+        status_profile_saved: "已保存配置: {name}",
+        status_profile_load_failed: "加载配置失败。",
+        status_profile_save_failed: "保存配置失败。",
         settings_title: "节点设置",
         settings_sorter: "分类器",
         settings_output: "输出",
         settings_excel: "Excel / CSV 文件",
+        settings_excel_reload: "重载",
+        settings_profile: "配置文件",
+        settings_profile_reload: "重载",
+        settings_profile_load: "加载",
+        settings_profile_save: "保存",
+        settings_profile_name: "另存为",
+        settings_profile_name_ph: "配置名称",
+        settings_profile_none: "(无)",
         settings_mapping: "分类映射",
         settings_order: "分类顺序",
         settings_default_category: "默认分类",
@@ -533,6 +561,24 @@ function injectStyle() {
         }
         .dts-field:last-child {
             margin-bottom: 0;
+        }
+        .dts-inline {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .dts-inline + .dts-inline {
+            margin-top: 6px;
+        }
+        .dts-inline .dts-input,
+        .dts-inline .dts-settings select,
+        .dts-inline .dts-textarea {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .dts-inline .dts-btn {
+            flex: 0 0 auto;
+            white-space: nowrap;
         }
         .dts-field label {
             display: block;
@@ -1305,18 +1351,170 @@ async function fetchJsonOrThrow(url, options = undefined) {
     return response.json();
 }
 
+function normalizeDefaultCategoryValue(rawValue, fallback = "未归类词") {
+    const text = String(rawValue ?? "").trim();
+    return text || fallback;
+}
+
+async function reloadExcelFileOptions(node, preferredValue = "", silent = false) {
+    const state = node.__dtsState;
+    const select = state?.settingsControls?.excelSelect;
+    if (!state || !select) return;
+
+    const currentValue = String(preferredValue || getWidgetValue(node, "excel_file", "danbooru_tags.xlsx") || "danbooru_tags.xlsx");
+    try {
+        const payload = await fetchJsonOrThrow("/danbooru_tag_picker/excel_files", { cache: "no-store" });
+        const files = Array.isArray(payload?.files) ? payload.files.map(x => String(x || "")).filter(Boolean) : [];
+        state.availableExcelFiles = files;
+        const options = files.map(name => ({ value: name, label: name }));
+        replaceSelectOptions(select, options, currentValue);
+        if (!silent) {
+            setStatus(node, "status_excel_files_loaded", { count: files.length });
+        }
+    } catch (error) {
+        if (!silent) {
+            setStatus(node, "status_excel_files_failed");
+        }
+        console.error("[DanbooruTagToolkit] failed to list excel files:", error);
+    }
+}
+
+async function reloadProfileOptions(node, preferredName = "", silent = false) {
+    const state = node.__dtsState;
+    const select = state?.settingsControls?.profileSelect;
+    if (!state || !select) return;
+
+    const currentName = String(preferredName || getWidgetValue(node, "config_profile", "") || "");
+    try {
+        const payload = await fetchJsonOrThrow("/danbooru_tag_picker/profile/list", { cache: "no-store" });
+        const profiles = Array.isArray(payload?.profiles) ? payload.profiles.map(x => String(x || "")).filter(Boolean) : [];
+        state.availableProfiles = profiles;
+        const options = [
+            { value: "", label: tr(state, "settings_profile_none") },
+            ...profiles.map(name => ({ value: name, label: name })),
+        ];
+        replaceSelectOptions(select, options, currentName);
+        if (state.settingsControls?.profileNameInput && !state.settingsControls.profileNameInput.matches(":focus")) {
+            state.settingsControls.profileNameInput.value = select.value || "";
+        }
+        if (!silent) {
+            setStatus(node, "status_ready");
+        }
+    } catch (error) {
+        if (!silent) {
+            setStatus(node, "status_profile_load_failed");
+        }
+        console.error("[DanbooruTagToolkit] failed to list profiles:", error);
+    }
+}
+
+async function loadProfileIntoSettings(node, profileName) {
+    const state = node.__dtsState;
+    const targetName = String(profileName || "").trim();
+    if (!state || !targetName) return;
+
+    try {
+        const payload = await fetchJsonOrThrow(
+            `/danbooru_tag_picker/profile/load?name=${encodeURIComponent(targetName)}`,
+            { cache: "no-store" }
+        );
+        const profile = payload?.profile || {};
+
+        setWidgetValue(state.excelWidget, String(profile.excel_file || "danbooru_tags.xlsx"));
+        setWidgetValue(state.mappingWidget, String(profile.category_mapping || "{}"));
+        setWidgetValue(state.orderWidget, String(profile.new_category_order || "[]"));
+        setWidgetValue(
+            state.defaultCategoryWidget,
+            normalizeDefaultCategoryValue(profile.default_category, "未归类词")
+        );
+        setWidgetValue(state.profileWidget, targetName);
+
+        node.setDirtyCanvas(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+        syncSettingsFromWidgets(node);
+        await reloadExcelFileOptions(node, String(profile.excel_file || ""), true);
+        await reloadProfileOptions(node, targetName, true);
+
+        if (state.isIntegrated) {
+            scheduleRefresh(node, 500);
+        } else {
+            renderPreview(node);
+        }
+        setStatus(node, "status_profile_loaded", { name: targetName });
+    } catch (error) {
+        setStatus(node, "status_profile_load_failed");
+        console.error("[DanbooruTagToolkit] failed to load profile:", error);
+    }
+}
+
+async function saveProfileFromSettings(node, profileName) {
+    const state = node.__dtsState;
+    const targetName = String(profileName || "").trim();
+    if (!state || !targetName) return;
+
+    const body = {
+        name: targetName,
+        excel_file: String(getWidgetValue(node, "excel_file", "danbooru_tags.xlsx") || "danbooru_tags.xlsx"),
+        category_mapping: String(getWidgetValue(node, "category_mapping", "{}") || "{}"),
+        new_category_order: String(getWidgetValue(node, "new_category_order", "[]") || "[]"),
+        default_category: normalizeDefaultCategoryValue(
+            getWidgetValue(node, "default_category", "未归类词"),
+            "未归类词"
+        ),
+    };
+    try {
+        const payload = await fetchJsonOrThrow("/danbooru_tag_picker/profile/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const savedName = String(payload?.profile_name || targetName);
+        setWidgetValue(state.profileWidget, savedName);
+        await reloadProfileOptions(node, savedName, true);
+        node.setDirtyCanvas(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+        setStatus(node, "status_profile_saved", { name: savedName });
+    } catch (error) {
+        setStatus(node, "status_profile_save_failed");
+        console.error("[DanbooruTagToolkit] failed to save profile:", error);
+    }
+}
+
+function buildPreviewSignature(node, previewText) {
+    return JSON.stringify({
+        tags: String(previewText || ""),
+        excel_file: String(getWidgetValue(node, "excel_file", "danbooru_tags.xlsx") || "danbooru_tags.xlsx"),
+        category_mapping: String(getWidgetValue(node, "category_mapping", "{}") || "{}"),
+        new_category_order: String(getWidgetValue(node, "new_category_order", "[]") || "[]"),
+        default_category: normalizeDefaultCategoryValue(getWidgetValue(node, "default_category", "未归类词"), "未归类词"),
+        regex_blacklist: String(getWidgetValue(node, "regex_blacklist", "") || ""),
+        tag_blacklist: String(getWidgetValue(node, "tag_blacklist", "") || ""),
+        deduplicate_tags: normalizeBooleanValue(getWidgetValue(node, "deduplicate_tags", false), false),
+        validation: normalizeBooleanValue(getWidgetValue(node, "validation", true), true),
+        force_reload: normalizeBooleanValue(getWidgetValue(node, "force_reload", false), false),
+        is_comment: normalizeBooleanValue(getWidgetValue(node, "is_comment", true), true),
+    });
+}
+
 async function refreshCategories(node) {
     const state = node.__dtsState;
     if (!state) return;
+    const tStart = performance.now();
+    let networkMs = 0;
     const requestId = (state.refreshRequestId || 0) + 1;
     state.refreshRequestId = requestId;
 
     const previewInfo = getPreviewTagsText(node);
     const usePreview = state.isIntegrated;
+    const previewSignature = buildPreviewSignature(node, previewInfo.previewText);
+    const signatureChanged = state.lastPreviewSignature !== previewSignature;
+    const useLatestFastPath = usePreview && !previewInfo.previewText.length && !signatureChanged;
 
     setStatus(
         node,
-        state.isIntegrated
+        useLatestFastPath
+            ? "status_loading_latest"
+            : state.isIntegrated
             ? "status_previewing_current"
             : "status_loading_latest"
     );
@@ -1332,65 +1530,98 @@ async function refreshCategories(node) {
                 excel_file: String(getWidgetValue(node, "excel_file", "danbooru_tags.xlsx")),
                 category_mapping: String(getWidgetValue(node, "category_mapping", "{}")),
                 new_category_order: String(getWidgetValue(node, "new_category_order", "[]")),
-                default_category: String(getWidgetValue(node, "default_category", "未归类词")),
+                default_category: normalizeDefaultCategoryValue(
+                    getWidgetValue(node, "default_category", "未归类词"),
+                    "未归类词"
+                ),
                 regex_blacklist: String(getWidgetValue(node, "regex_blacklist", "")),
                 tag_blacklist: String(getWidgetValue(node, "tag_blacklist", "")),
                 deduplicate_tags: normalizeBooleanValue(getWidgetValue(node, "deduplicate_tags", false), false),
                 validation: normalizeBooleanValue(getWidgetValue(node, "validation", true), true),
-                force_reload: normalizeBooleanValue(getWidgetValue(node, "force_reload", false), false),
+                // Refresh 预览阶段禁用强制重载，避免每次都清空后端缓存导致重读 xlsx。
+                force_reload: false,
                 is_comment: normalizeBooleanValue(getWidgetValue(node, "is_comment", true), true),
             };
 
-            const previewData = await fetchJsonOrThrow("/danbooru_tag_picker/preview", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(previewPayload),
-            });
-
-            const mergedCategories = normalizeCategories(previewData.categories || {});
-
-            // 输入 tags 为空（例如 WD14 连线场景）时，优先保留分类骨架，再尝试用最新缓存填充真实 tags。
-            if (!previewInfo.previewText.length) {
+            if (useLatestFastPath) {
                 try {
+                    const tNet0 = performance.now();
                     const latestData = await fetchJsonOrThrow(
                         `/danbooru_tag_picker/latest?node_id=${encodeURIComponent(String(node.id))}`,
                         { cache: "no-store" }
                     );
+                    networkMs += performance.now() - tNet0;
                     const latestCategories = normalizeCategories(latestData.categories || {});
                     if (Object.keys(latestCategories).length > 0) {
-                        const skeletonLookup = {};
-                        for (const category of Object.keys(mergedCategories)) {
-                            const key = normalizeCategory(category);
-                            if (!(key in skeletonLookup)) {
-                                skeletonLookup[key] = category;
-                            }
-                        }
-
-                        let hasFilledAny = false;
-                        for (const [category, tags] of Object.entries(latestCategories)) {
-                            const key = normalizeCategory(category);
-                            const targetCategory = skeletonLookup[key];
-                            if (!targetCategory) continue;
-                            mergedCategories[targetCategory] = Array.isArray(tags) ? tags : [];
-                            hasFilledAny = true;
-                        }
-                        if (hasFilledAny) {
-                            source = "latest";
-                        }
+                        source = "latest";
+                        payload = { ...latestData, categories: latestCategories };
+                        state.lastPreviewSignature = previewSignature;
                     }
                 } catch {
-                    // ignore latest-fallback failure and keep preview skeleton
+                    // latest fast path failed, fallback to preview below
                 }
             }
 
-            payload = { ...previewData, categories: mergedCategories };
+            if (!payload) {
+                const tNet0 = performance.now();
+                const previewData = await fetchJsonOrThrow("/danbooru_tag_picker/preview", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(previewPayload),
+                });
+                networkMs += performance.now() - tNet0;
+                state.lastPreviewSignature = previewSignature;
+
+                const mergedCategories = normalizeCategories(previewData.categories || {});
+
+                // 输入 tags 为空（例如 WD14 连线场景）时，优先保留分类骨架，再尝试用最新缓存填充真实 tags。
+                if (!previewInfo.previewText.length) {
+                    try {
+                        const tNet0 = performance.now();
+                        const latestData = await fetchJsonOrThrow(
+                            `/danbooru_tag_picker/latest?node_id=${encodeURIComponent(String(node.id))}`,
+                            { cache: "no-store" }
+                        );
+                        networkMs += performance.now() - tNet0;
+                        const latestCategories = normalizeCategories(latestData.categories || {});
+                        if (Object.keys(latestCategories).length > 0) {
+                            const skeletonLookup = {};
+                            for (const category of Object.keys(mergedCategories)) {
+                                const key = normalizeCategory(category);
+                                if (!(key in skeletonLookup)) {
+                                    skeletonLookup[key] = category;
+                                }
+                            }
+
+                            let hasFilledAny = false;
+                            for (const [category, tags] of Object.entries(latestCategories)) {
+                                const key = normalizeCategory(category);
+                                const targetCategory = skeletonLookup[key];
+                                if (!targetCategory) continue;
+                                mergedCategories[targetCategory] = Array.isArray(tags) ? tags : [];
+                                hasFilledAny = true;
+                            }
+                            if (hasFilledAny) {
+                                source = "latest";
+                            }
+                        }
+                    } catch {
+                        // ignore latest-fallback failure and keep preview skeleton
+                    }
+                }
+
+                payload = { ...previewData, categories: mergedCategories };
+            }
         } else {
+            const tNet0 = performance.now();
             payload = await fetchJsonOrThrow(
                 `/danbooru_tag_picker/latest?node_id=${encodeURIComponent(String(node.id))}`,
                 { cache: "no-store" }
             );
+            networkMs += performance.now() - tNet0;
         }
         if (requestId !== state.refreshRequestId) return;
+        const tBeforeRender = performance.now();
         state.categories = normalizeCategories(payload.categories || {});
 
         pruneSelectionByAvailability(state);
@@ -1406,6 +1637,25 @@ async function refreshCategories(node) {
         setStatus(node, statusKey, { count });
 
         renderAll(node);
+        const tEnd = performance.now();
+        const totalTags = Object.values(state.categories).reduce(
+            (sum, tags) => sum + (Array.isArray(tags) ? tags.length : 0),
+            0
+        );
+        console.log(
+            "[DanbooruTagToolkit] Refresh timing:",
+            {
+                node_id: String(node.id),
+                source,
+                use_latest_fast_path: useLatestFastPath,
+                tags_chars: previewInfo.previewText.length,
+                categories: Object.keys(state.categories).length,
+                tags_total: totalTags,
+                network_ms: Number(networkMs.toFixed(1)),
+                render_ms: Number((tEnd - tBeforeRender).toFixed(1)),
+                total_ms: Number((tEnd - tStart).toFixed(1)),
+            }
+        );
     } catch (error) {
         if (requestId !== state.refreshRequestId) return;
         setStatus(node, "status_failed");
@@ -1789,6 +2039,17 @@ function applyLanguage(node, rerender = true) {
     if (srefs.sorterTitle) srefs.sorterTitle.textContent = tr(state, "settings_sorter");
     if (srefs.outputTitle) srefs.outputTitle.textContent = tr(state, "settings_output");
     if (srefs.excelLabel) srefs.excelLabel.textContent = tr(state, "settings_excel");
+    if (srefs.excelReloadBtn) srefs.excelReloadBtn.textContent = tr(state, "settings_excel_reload");
+    if (srefs.profileLabel) srefs.profileLabel.textContent = tr(state, "settings_profile");
+    if (srefs.profileReloadBtn) srefs.profileReloadBtn.textContent = tr(state, "settings_profile_reload");
+    if (srefs.profileLoadBtn) srefs.profileLoadBtn.textContent = tr(state, "settings_profile_load");
+    if (srefs.profileSaveBtn) srefs.profileSaveBtn.textContent = tr(state, "settings_profile_save");
+    if (srefs.profileNameLabel) srefs.profileNameLabel.textContent = tr(state, "settings_profile_name");
+    if (srefs.profileNameInput) srefs.profileNameInput.placeholder = tr(state, "settings_profile_name_ph");
+    if (state.settingsControls?.profileSelect) {
+        const noneOption = state.settingsControls.profileSelect.querySelector('option[value=""]');
+        if (noneOption) noneOption.textContent = tr(state, "settings_profile_none");
+    }
     if (srefs.mappingLabel) srefs.mappingLabel.textContent = tr(state, "settings_mapping");
     if (srefs.orderLabel) srefs.orderLabel.textContent = tr(state, "settings_order");
     if (srefs.defaultLabel) srefs.defaultLabel.textContent = tr(state, "settings_default_category");
@@ -1864,6 +2125,47 @@ function createInputField(labelText, type = "text") {
     return { field, input, label };
 }
 
+function createSelectField(labelText) {
+    const field = document.createElement("div");
+    field.className = "dts-field";
+
+    const label = document.createElement("label");
+    label.textContent = labelText;
+
+    const select = document.createElement("select");
+    select.className = "dts-input";
+
+    field.appendChild(label);
+    field.appendChild(select);
+    return { field, select, label };
+}
+
+function replaceSelectOptions(select, options, currentValue = "") {
+    if (!select) return;
+    const normalizedCurrent = String(currentValue || "");
+    select.innerHTML = "";
+
+    for (const entry of options) {
+        const option = document.createElement("option");
+        option.value = String(entry?.value ?? "");
+        option.textContent = String(entry?.label ?? option.value);
+        select.appendChild(option);
+    }
+
+    if (normalizedCurrent) {
+        const hasCurrent = options.some(entry => String(entry?.value ?? "") === normalizedCurrent);
+        if (!hasCurrent) {
+            const custom = document.createElement("option");
+            custom.value = normalizedCurrent;
+            custom.textContent = normalizedCurrent;
+            select.appendChild(custom);
+        }
+        select.value = normalizedCurrent;
+    } else if (select.options.length > 0) {
+        select.selectedIndex = 0;
+    }
+}
+
 function createToggleRow(labelText) {
     const row = document.createElement("label");
     row.className = "dts-toggle";
@@ -1893,7 +2195,41 @@ function createSettingsPanel(node) {
     sorterTitle.textContent = tr(state, "settings_sorter");
     sorterSection.appendChild(sorterTitle);
 
-    const excelField = createInputField(tr(state, "settings_excel"));
+    const excelField = createSelectField(tr(state, "settings_excel"));
+    const excelInline = document.createElement("div");
+    excelInline.className = "dts-inline";
+    const excelReloadBtn = document.createElement("button");
+    excelReloadBtn.className = "dts-btn";
+    excelReloadBtn.textContent = tr(state, "settings_excel_reload");
+    excelInline.appendChild(excelField.select);
+    excelInline.appendChild(excelReloadBtn);
+    excelField.field.appendChild(excelInline);
+
+    const profileField = createSelectField(tr(state, "settings_profile"));
+    const profileInline = document.createElement("div");
+    profileInline.className = "dts-inline";
+    const profileReloadBtn = document.createElement("button");
+    profileReloadBtn.className = "dts-btn";
+    profileReloadBtn.textContent = tr(state, "settings_profile_reload");
+    profileInline.appendChild(profileField.select);
+    profileInline.appendChild(profileReloadBtn);
+    profileField.field.appendChild(profileInline);
+
+    const profileNameField = createInputField(tr(state, "settings_profile_name"));
+    profileNameField.input.placeholder = tr(state, "settings_profile_name_ph");
+    const profileActionInline = document.createElement("div");
+    profileActionInline.className = "dts-inline";
+    const profileLoadBtn = document.createElement("button");
+    profileLoadBtn.className = "dts-btn";
+    profileLoadBtn.textContent = tr(state, "settings_profile_load");
+    const profileSaveBtn = document.createElement("button");
+    profileSaveBtn.className = "dts-btn";
+    profileSaveBtn.textContent = tr(state, "settings_profile_save");
+    profileActionInline.appendChild(profileNameField.input);
+    profileActionInline.appendChild(profileLoadBtn);
+    profileActionInline.appendChild(profileSaveBtn);
+    profileNameField.field.appendChild(profileActionInline);
+
     const mapField = createInputField(tr(state, "settings_mapping"), "textarea");
     const orderField = createInputField(tr(state, "settings_order"), "textarea");
     const defaultField = createInputField(tr(state, "settings_default_category"));
@@ -1906,6 +2242,8 @@ function createSettingsPanel(node) {
     const commentRow = createToggleRow(tr(state, "settings_comment"));
 
     sorterSection.appendChild(excelField.field);
+    sorterSection.appendChild(profileField.field);
+    sorterSection.appendChild(profileNameField.field);
     sorterSection.appendChild(mapField.field);
     sorterSection.appendChild(orderField.field);
     sorterSection.appendChild(defaultField.field);
@@ -1965,11 +2303,39 @@ function createSettingsPanel(node) {
     panel.appendChild(sorterSection);
     panel.appendChild(outputSection);
 
-    bindTextInput(excelField.input, state.excelWidget, () => {
+    excelField.select.onchange = () => {
+        const picked = String(excelField.select.value || "");
+        setWidgetValue(state.excelWidget, picked);
         node.setDirtyCanvas(true, true);
         app.graph?.setDirtyCanvas?.(true, true);
         if (state.isIntegrated) scheduleRefresh(node, 500);
-    });
+    };
+    excelReloadBtn.onclick = async () => {
+        await reloadExcelFileOptions(node, String(getWidgetValue(node, "excel_file", "danbooru_tags.xlsx") || ""), false);
+    };
+    profileField.select.onchange = () => {
+        const picked = String(profileField.select.value || "");
+        setWidgetValue(state.profileWidget, picked);
+        if (profileNameField.input && !profileNameField.input.matches(":focus")) {
+            profileNameField.input.value = picked;
+        }
+        node.setDirtyCanvas(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+    };
+    profileReloadBtn.onclick = async () => {
+        await reloadProfileOptions(node, String(getWidgetValue(node, "config_profile", "") || ""), false);
+    };
+    profileLoadBtn.onclick = async () => {
+        const target = String(profileField.select.value || profileNameField.input.value || "").trim();
+        if (!target) return;
+        await loadProfileIntoSettings(node, target);
+    };
+    profileSaveBtn.onclick = async () => {
+        const target = String(profileNameField.input.value || profileField.select.value || "").trim();
+        if (!target) return;
+        await saveProfileFromSettings(node, target);
+    };
+
     bindTextInput(mapField.input, state.mappingWidget, () => {
         node.setDirtyCanvas(true, true);
         app.graph?.setDirtyCanvas?.(true, true);
@@ -2039,7 +2405,13 @@ function createSettingsPanel(node) {
     });
 
     state.settingsControls = {
-        excelInput: excelField.input,
+        excelSelect: excelField.select,
+        excelReloadBtn,
+        profileSelect: profileField.select,
+        profileReloadBtn,
+        profileLoadBtn,
+        profileSaveBtn,
+        profileNameInput: profileNameField.input,
         mappingInput: mapField.input,
         orderInput: orderField.input,
         defaultInput: defaultField.input,
@@ -2061,6 +2433,13 @@ function createSettingsPanel(node) {
         sorterTitle,
         outputTitle,
         excelLabel: excelField.label,
+        excelReloadBtn,
+        profileLabel: profileField.label,
+        profileReloadBtn,
+        profileLoadBtn,
+        profileSaveBtn,
+        profileNameLabel: profileNameField.label,
+        profileNameInput: profileNameField.input,
         mappingLabel: mapField.label,
         orderLabel: orderField.label,
         defaultLabel: defaultField.label,
@@ -2089,10 +2468,33 @@ function syncSettingsFromWidgets(node) {
     if (state.separatorWidget && state.separatorWidget.value !== separator) {
         setWidgetValue(state.separatorWidget, separator);
     }
-    state.settingsControls.excelInput.value = String(getWidgetValue(node, "excel_file", "danbooru_tags.xlsx") || "");
+    const excelValue = String(getWidgetValue(node, "excel_file", "danbooru_tags.xlsx") || "");
+    if (state.settingsControls.excelSelect) {
+        replaceSelectOptions(
+            state.settingsControls.excelSelect,
+            (state.availableExcelFiles || []).map(name => ({ value: name, label: name })),
+            excelValue
+        );
+    }
+
+    const profileValue = String(getWidgetValue(node, "config_profile", "") || "");
+    if (state.settingsControls.profileSelect) {
+        const profileOptions = [
+            { value: "", label: tr(state, "settings_profile_none") },
+            ...(state.availableProfiles || []).map(name => ({ value: name, label: name })),
+        ];
+        replaceSelectOptions(state.settingsControls.profileSelect, profileOptions, profileValue);
+    }
+    if (state.settingsControls.profileNameInput && !state.settingsControls.profileNameInput.matches(":focus")) {
+        state.settingsControls.profileNameInput.value = profileValue;
+    }
+
     state.settingsControls.mappingInput.value = String(getWidgetValue(node, "category_mapping", "") || "");
     state.settingsControls.orderInput.value = String(getWidgetValue(node, "new_category_order", "") || "");
-    state.settingsControls.defaultInput.value = String(getWidgetValue(node, "default_category", "未归类词") || "");
+    state.settingsControls.defaultInput.value = normalizeDefaultCategoryValue(
+        getWidgetValue(node, "default_category", "未归类词"),
+        "未归类词"
+    );
     state.settingsControls.regexInput.value = String(getWidgetValue(node, "regex_blacklist", "") || "");
     state.settingsControls.blacklistInput.value = String(getWidgetValue(node, "tag_blacklist", "") || "");
 
@@ -2134,6 +2536,7 @@ app.registerExtension({
             const excelWidget = getWidget(this, "excel_file");
             const mappingWidget = getWidget(this, "category_mapping");
             const orderWidget = getWidget(this, "new_category_order");
+            const profileWidget = getWidget(this, "config_profile");
             const defaultCategoryWidget = getWidget(this, "default_category");
             const regexWidget = getWidget(this, "regex_blacklist");
             const tagBlacklistWidget = getWidget(this, "tag_blacklist");
@@ -2150,6 +2553,7 @@ app.registerExtension({
                     excelWidget,
                     mappingWidget,
                     orderWidget,
+                    profileWidget,
                     defaultCategoryWidget,
                     regexWidget,
                     tagBlacklistWidget,
@@ -2326,6 +2730,7 @@ app.registerExtension({
                 excelWidget,
                 mappingWidget,
                 orderWidget,
+                profileWidget,
                 defaultCategoryWidget,
                 regexWidget,
                 tagBlacklistWidget,
@@ -2333,6 +2738,8 @@ app.registerExtension({
                 validationWidget,
                 forceReloadWidget,
                 commentWidget,
+                availableExcelFiles: [],
+                availableProfiles: [],
                 categories: {},
                 selected: parseSelected(selectedWidget?.value),
                 selectedCategories: parseSelected(selectedCategoriesWidget?.value),
@@ -2340,6 +2747,7 @@ app.registerExtension({
                 dragIndex: null,
                 refreshTimer: null,
                 refreshRequestId: 0,
+                lastPreviewSignature: "",
                 settingsOpen: false,
                 searchText: "",
                 categoryFilter: "__all",
@@ -2371,12 +2779,18 @@ app.registerExtension({
             this.__dtsState.settingsPanel = settingsPanel;
             root.appendChild(settingsPanel);
             syncSettingsFromWidgets(this);
+            reloadExcelFileOptions(this, String(getWidgetValue(this, "excel_file", "danbooru_tags.xlsx") || ""), true);
+            reloadProfileOptions(this, String(getWidgetValue(this, "config_profile", "") || ""), true);
 
             refreshBtn.onclick = () => refreshCategories(this);
             settingsBtn.onclick = () => {
                 const state = this.__dtsState;
                 state.settingsOpen = !state.settingsOpen;
                 settingsPanel.classList.toggle("dts-hidden", !state.settingsOpen);
+                if (state.settingsOpen) {
+                    reloadExcelFileOptions(this, String(getWidgetValue(this, "excel_file", "danbooru_tags.xlsx") || ""), true);
+                    reloadProfileOptions(this, String(getWidgetValue(this, "config_profile", "") || ""), true);
+                }
             };
             langBtn.onclick = () => {
                 const state = this.__dtsState;
@@ -2467,6 +2881,7 @@ app.registerExtension({
                 "excel_file",
                 "category_mapping",
                 "new_category_order",
+                "config_profile",
                 "default_category",
                 "regex_blacklist",
                 "tag_blacklist",

@@ -38,6 +38,7 @@ _GALLERY_OUTPUT_SELECTION_LIMIT = 0
 _GALLERY_AUTOCOMPLETE_CACHE_TTL = 300
 _GALLERY_AUTOCOMPLETE_CACHE_LIMIT = 256
 SEPARATOR_OPTIONS = ["comma", "newline", "space", True, False, "True", "False", "true", "false"]
+_SORTER_PRESET_DIR_NAME = "sorter_presets"
 
 
 def load_defaults_from_json():
@@ -287,6 +288,111 @@ def _resolve_excel_path(excel_file: str) -> str:
     return os.path.join(data_base_dir, excel_file)
 
 
+def _list_available_tag_files() -> List[str]:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    data_base_dir = os.path.join(current_dir, "tags_database")
+    allowed_ext = {".xlsx", ".xls", ".csv"}
+    if not os.path.isdir(data_base_dir):
+        return []
+
+    file_names: List[str] = []
+    try:
+        for name in os.listdir(data_base_dir):
+            full_path = os.path.join(data_base_dir, name)
+            if not os.path.isfile(full_path):
+                continue
+            _, ext = os.path.splitext(name)
+            if ext.lower() in allowed_ext:
+                file_names.append(name)
+    except Exception:
+        return []
+
+    file_names.sort(key=lambda x: x.lower())
+    return file_names
+
+
+def _normalize_preset_name(raw_name: Any) -> str:
+    name = str(raw_name or "").strip()
+    if not name:
+        return ""
+    name = os.path.basename(name)
+    if name.lower().endswith(".json"):
+        name = name[:-5]
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name).strip(" .")
+    return name[:80]
+
+
+def _get_sorter_preset_dir() -> str:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(current_dir, _SORTER_PRESET_DIR_NAME)
+
+
+def _list_sorter_presets() -> List[str]:
+    preset_dir = _get_sorter_preset_dir()
+    if not os.path.isdir(preset_dir):
+        return []
+
+    names: List[str] = []
+    try:
+        for filename in os.listdir(preset_dir):
+            full_path = os.path.join(preset_dir, filename)
+            if not os.path.isfile(full_path):
+                continue
+            if not filename.lower().endswith(".json"):
+                continue
+            names.append(os.path.splitext(filename)[0])
+    except Exception:
+        return []
+    names.sort(key=lambda x: x.lower())
+    return names
+
+
+def _load_sorter_preset(name: str) -> Dict[str, Any]:
+    normalized = _normalize_preset_name(name)
+    if not normalized:
+        raise ValueError("Invalid preset name")
+
+    preset_dir = _get_sorter_preset_dir()
+    preset_path = os.path.join(preset_dir, f"{normalized}.json")
+    if not os.path.isfile(preset_path):
+        raise FileNotFoundError("Preset not found")
+
+    with open(preset_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid preset content")
+
+    return {
+        "name": normalized,
+        "excel_file": str(payload.get("excel_file", "danbooru_tags.xlsx") or "danbooru_tags.xlsx"),
+        "category_mapping": str(payload.get("category_mapping", DEFAULT_MAPPING_TEXT) or DEFAULT_MAPPING_TEXT),
+        "new_category_order": str(payload.get("new_category_order", DEFAULT_ORDER_TEXT) or DEFAULT_ORDER_TEXT),
+        "default_category": str(payload.get("default_category", "未归类词") or "未归类词"),
+    }
+
+
+def _save_sorter_preset(name: str, payload: Dict[str, Any]) -> str:
+    normalized = _normalize_preset_name(name)
+    if not normalized:
+        raise ValueError("Invalid preset name")
+
+    preset_dir = _get_sorter_preset_dir()
+    os.makedirs(preset_dir, exist_ok=True)
+    preset_path = os.path.join(preset_dir, f"{normalized}.json")
+
+    data = {
+        "excel_file": str(payload.get("excel_file", "danbooru_tags.xlsx") or "danbooru_tags.xlsx"),
+        "category_mapping": str(payload.get("category_mapping", DEFAULT_MAPPING_TEXT) or DEFAULT_MAPPING_TEXT),
+        "new_category_order": str(payload.get("new_category_order", DEFAULT_ORDER_TEXT) or DEFAULT_ORDER_TEXT),
+        "default_category": str(payload.get("default_category", "未归类词") or "未归类词"),
+        "updated_at": int(time.time()),
+    }
+    with open(preset_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return normalized
+
+
 def _clean_sheet_text(value: Any) -> str:
     try:
         if pd.isna(value):
@@ -388,11 +494,14 @@ def _execute_sorting(
     统一执行分类逻辑，供旧 Sorter 节点、一体化节点、预览 API 复用。
     返回 (all_str, cat_dict, final_excel_path, cat_map, cat_order)。
     """
+    t0 = time.perf_counter()
+    default_category = str(default_category or "").strip() or "未归类词"
     final_excel_path = _resolve_excel_path(excel_file)
 
     cat_map = _parse_input_data(category_mapping, DEFAULT_MAPPING_TEXT, dict)
     parsed_order = _parse_input_data(new_category_order, DEFAULT_ORDER_TEXT, list)
     cat_order = _build_category_order(parsed_order, default_category)
+    t1 = time.perf_counter()
 
     if validation:
         used = set(cat_map.values())
@@ -407,8 +516,10 @@ def _execute_sorting(
     if force_reload:
         global _tag_cache
         _tag_cache.clear()
+    t2 = time.perf_counter()
 
     sorter = DanbooruTagSorter(final_excel_path, cat_map, cat_order, default_category)
+    t3 = time.perf_counter()
     all_str, cat_dict = sorter.process_tags(
         tags,
         is_comment,
@@ -416,8 +527,24 @@ def _execute_sorting(
         tag_blacklist,
         deduplicate_tags
     )
+    t4 = time.perf_counter()
     for category in cat_order:
         cat_dict.setdefault(category, "")
+    t5 = time.perf_counter()
+    try:
+        print(
+            "[DanbooruTagToolkit] Sorting timing: "
+            f"parse={((t1 - t0) * 1000):.1f}ms, "
+            f"reload_check={((t2 - t1) * 1000):.1f}ms, "
+            f"sorter_init={((t3 - t2) * 1000):.1f}ms, "
+            f"process={((t4 - t3) * 1000):.1f}ms, "
+            f"post={((t5 - t4) * 1000):.1f}ms, "
+            f"total={((t5 - t0) * 1000):.1f}ms, "
+            f"cache_hit={getattr(sorter, '_last_cache_hit', None)}, "
+            f"tags_chars={len(str(tags or ''))}"
+        )
+    except Exception:
+        pass
     return all_str, cat_dict, final_excel_path, cat_map, cat_order
 
 
@@ -621,7 +748,11 @@ def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") 
             "id": post_id,
             "preview_url": preview_url,
             "image_url": image_url,
-            "display_url": _absolutize_danbooru_url(item.get("large_file_url")) or preview_url,
+            "display_url": (
+                _absolutize_danbooru_url(item.get("large_file_url"))
+                or _absolutize_danbooru_url(item.get("file_url"))
+                or preview_url
+            ),
             "preview_width": int(item.get("preview_width", 0) or 0),
             "preview_height": int(item.get("preview_height", 0) or 0),
             "image_width": int(item.get("image_width", 0) or 0),
@@ -744,6 +875,7 @@ class DanbooruTagSorter:
         self.category_mapping = category_mapping  # 映射规则 {('原有大类', '原有小类'): '新分类名'}
         self.new_category_order = new_category_order  # 定义输出时各个分类及各个分类的顺序
         self.default_category = default_category
+        self._last_cache_hit = False
         self.tag_db = self._load_database_with_cache()  # 初始化立刻先尝试加载或从缓存获取数据库
 
     # 根据原始的大类小类查表，得到新的分类名
@@ -766,12 +898,18 @@ class DanbooruTagSorter:
     # 生成哈希键
     # 判断当前的配置参数是否和上次缓存一致
     def _generate_cache_key(self):
+        # 缓存只与“数据库文件内容”相关，不随 mapping/order/default_category 变化。
+        # 这样切换配置时不会重复读取 xlsx。
+        abs_excel_path = os.path.abspath(self.excel_path or "")
         params = {
-            "excel_path": self.excel_path,
-            # 将字典排序后dump为string，这样即使字典的key顺序不同，生成的哈希也一致
-            "category_mapping": json.dumps(sorted(self.category_mapping.items())),
-            "default_category": self.default_category
+            "excel_path": abs_excel_path,
         }
+        try:
+            st = os.stat(abs_excel_path)
+            params["excel_mtime_ns"] = int(st.st_mtime_ns)
+            params["excel_size"] = int(st.st_size)
+        except Exception:
+            pass
         params_str = json.dumps(params, sort_keys=True)
         hasher = hashlib.md5(params_str.encode(encoding='utf-8')).hexdigest()
         # 返回MD5
@@ -782,8 +920,10 @@ class DanbooruTagSorter:
         cache_key = self._generate_cache_key()
         # 检查缓存是否命中
         if cache_key in _tag_cache:
+            self._last_cache_hit = True
             print(f"从缓存加载数据库喵:{self.excel_path}")
             return _tag_cache[cache_key]
+        self._last_cache_hit = False
         print(f"正在读取数据库喵:{self.excel_path} ...")  # 如果缓存未命中，则读取数据库
 
         # 基础校验
@@ -808,15 +948,12 @@ class DanbooruTagSorter:
                 if not eng_tag:
                     continue
 
-                #计算该tag映射后是谁家的兵
-                new_cat = self.get_new_category(cat, sub)
                 #所有的下划线都替换为空格以匹配输入习惯
                 clean_key = eng_tag.replace('_', ' ')
                 tag_db[clean_key] = {
                     'original': eng_tag,
                     'original_category': cat,
                     'original_subcategory': sub,
-                    'new_category': new_cat,
                     'rank': index
                 }
             print(f"数据库加载完成喵，共索引{len(tag_db)}个 Tags喵。")
@@ -881,7 +1018,10 @@ class DanbooruTagSorter:
             lookup_key = tag_lower.replace('_', ' ')  # 构造查询Key
             if lookup_key in self.tag_db:  # 缓存命中
                 info = self.tag_db[lookup_key]
-                group_key = info['new_category']
+                group_key = self.get_new_category(
+                    info.get('original_category', ''),
+                    info.get('original_subcategory', '')
+                )
                 # 检查该分类是否在Order列表中
                 if group_key in allowed_categories_set:
                     # 如果在Order里就正常归类
@@ -961,6 +1101,7 @@ class DanbooruTagSorterSelectorNode:
                     "default": DEFAULT_ORDER_TEXT,
                     "placeholder": CATEGORY_ORDER_PLACEHOLDER
                 }),
+                "config_profile": ("STRING", {"multiline": False, "default": ""}),
                 "default_category": ("STRING", {"default": "未归类词"}),
                 "regex_blacklist": ("STRING", {"default": ""}),
                 "tag_blacklist": ("STRING", {
@@ -998,6 +1139,7 @@ class DanbooruTagSorterSelectorNode:
         excel_file="danbooru_tags.xlsx",
         category_mapping="",
         new_category_order="",
+        config_profile="",
         default_category="未归类词",
         regex_blacklist="",
         tag_blacklist="",
@@ -1176,7 +1318,9 @@ if PromptServer is not None and web is not None:
         @PromptServer.instance.routes.post("/danbooru_tag_picker/preview")
         async def preview_bundle_for_selector(request):
             try:
+                preview_t0 = time.perf_counter()
                 data = await request.json()
+                preview_t1 = time.perf_counter()
                 node_id = str(data.get("node_id", "")).strip()
 
                 tags = str(data.get("tags", ""))
@@ -1206,8 +1350,22 @@ if PromptServer is not None and web is not None:
                 )
 
                 normalized = _normalize_bundle_for_ui(cat_dict)
+                preview_t2 = time.perf_counter()
                 if node_id:
                     _latest_tag_bundle_by_node[node_id] = normalized
+                preview_t3 = time.perf_counter()
+                try:
+                    total_tags = sum(len(v) for v in normalized.values())
+                    print(
+                        "[DanbooruTagToolkit] Preview API timing: "
+                        f"json={((preview_t1 - preview_t0) * 1000):.1f}ms, "
+                        f"sort+normalize={((preview_t2 - preview_t1) * 1000):.1f}ms, "
+                        f"cache_store={((preview_t3 - preview_t2) * 1000):.1f}ms, "
+                        f"total={((preview_t3 - preview_t0) * 1000):.1f}ms, "
+                        f"cats={len(normalized)}, tags={total_tags}, node={node_id or '-'}"
+                    )
+                except Exception:
+                    pass
 
                 return web.json_response({
                     "status": "success",
@@ -1222,6 +1380,77 @@ if PromptServer is not None and web is not None:
                     "message": str(e),
                     "categories": {},
                     "all_tags": "",
+                }, status=500)
+
+        @PromptServer.instance.routes.get("/danbooru_tag_picker/excel_files")
+        async def list_excel_files_for_selector(request):
+            try:
+                files = _list_available_tag_files()
+                return web.json_response({
+                    "status": "success",
+                    "files": files,
+                    "count": len(files),
+                })
+            except Exception as e:
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e),
+                    "files": [],
+                    "count": 0,
+                }, status=500)
+
+        @PromptServer.instance.routes.get("/danbooru_tag_picker/profile/list")
+        async def list_sorter_profiles(request):
+            try:
+                names = _list_sorter_presets()
+                return web.json_response({
+                    "status": "success",
+                    "profiles": names,
+                    "count": len(names),
+                })
+            except Exception as e:
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e),
+                    "profiles": [],
+                    "count": 0,
+                }, status=500)
+
+        @PromptServer.instance.routes.get("/danbooru_tag_picker/profile/load")
+        async def load_sorter_profile(request):
+            try:
+                name = str(request.query.get("name", "")).strip()
+                data = _load_sorter_preset(name)
+                return web.json_response({
+                    "status": "success",
+                    "profile": data,
+                })
+            except Exception as e:
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e),
+                    "profile": {},
+                }, status=400)
+
+        @PromptServer.instance.routes.post("/danbooru_tag_picker/profile/save")
+        async def save_sorter_profile(request):
+            try:
+                body = await request.json()
+                name = _normalize_preset_name(body.get("name", ""))
+                if not name:
+                    return web.json_response({
+                        "status": "error",
+                        "message": "Invalid profile name",
+                    }, status=400)
+                saved_name = _save_sorter_preset(name, body if isinstance(body, dict) else {})
+                return web.json_response({
+                    "status": "success",
+                    "profile_name": saved_name,
+                })
+            except Exception as e:
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e),
                 }, status=500)
 
         @PromptServer.instance.routes.get("/danbooru_tag_gallery/posts")
