@@ -112,16 +112,24 @@ function injectStyle() {
             color: #9fb6d9;
             min-height: 18px;
         }
+        .dtg-content {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 230px;
+            gap: 10px;
+            flex: 1 1 auto;
+            min-height: 220px;
+            max-height: none;
+            overflow: hidden;
+        }
         .dtg-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
             gap: 8px;
-            flex: 1 1 auto;
-            min-height: 220px;
-            max-height: none;
             align-content: start;
             overflow: auto;
             padding-right: 2px;
+            min-height: 0;
+            height: 100%;
         }
         .dtg-card {
             position: relative;
@@ -164,12 +172,17 @@ function injectStyle() {
             opacity: 1;
             transform: translateY(0);
         }
+        .dtg-thumb-wrap {
+            width: 100%;
+            overflow: hidden;
+            background: #0b0b0b;
+            aspect-ratio: 1;
+        }
         .dtg-thumb {
             width: 100%;
-            height: 130px;
+            height: 100%;
             object-fit: cover;
             display: block;
-            background: #0b0b0b;
         }
         .dtg-meta {
             padding: 6px;
@@ -198,9 +211,100 @@ function injectStyle() {
             display: flex;
             gap: 8px;
         }
+        .dtg-picked {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            height: 100%;
+            border: 1px solid #343434;
+            border-radius: 8px;
+            background: #121212;
+            overflow: hidden;
+        }
+        .dtg-picked-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            border-bottom: 1px solid #2a2a2a;
+            color: #d8d8d8;
+            font-size: 12px;
+            flex-shrink: 0;
+        }
+        .dtg-picked-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 8px;
+            overflow: auto;
+            min-height: 0;
+        }
+        .dtg-picked-empty {
+            color: #8c8c8c;
+            border: 1px dashed #3d3d3d;
+            border-radius: 8px;
+            padding: 10px;
+            text-align: center;
+            font-size: 11px;
+        }
+        .dtg-picked-item {
+            display: grid;
+            grid-template-columns: 56px minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid #343434;
+            border-radius: 8px;
+            background: #151515;
+            padding: 6px;
+        }
+        .dtg-picked-thumb {
+            width: 56px;
+            height: 56px;
+            border-radius: 6px;
+            object-fit: cover;
+            background: #0b0b0b;
+        }
+        .dtg-picked-meta {
+            min-width: 0;
+            color: #cfcfcf;
+            font-size: 11px;
+        }
+        .dtg-picked-id {
+            font-weight: 600;
+            color: #f2f2f2;
+            margin-bottom: 2px;
+        }
+        .dtg-picked-prompt {
+            color: #bdbdbd;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .dtg-picked-remove {
+            border: 1px solid #3a3a3a;
+            background: #222;
+            color: #ececec;
+            border-radius: 6px;
+            width: 26px;
+            height: 26px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .dtg-picked-remove:hover {
+            background: #2c2c2c;
+        }
         @media (max-width: 760px) {
             .dtg-toolbar {
                 grid-template-columns: 1fr 1fr 1fr;
+            }
+        }
+        @media (max-width: 980px) {
+            .dtg-content {
+                grid-template-columns: 1fr;
+            }
+            .dtg-picked {
+                max-height: 220px;
             }
         }
     `;
@@ -328,6 +432,10 @@ function normalizePost(raw) {
         md5: String(post.md5 ?? ""),
         preview_url: String(post.preview_url ?? ""),
         image_url: String(post.image_url ?? ""),
+        preview_width: Number(post.preview_width ?? 0),
+        preview_height: Number(post.preview_height ?? 0),
+        image_width: Number(post.image_width ?? 0),
+        image_height: Number(post.image_height ?? 0),
         tag_string: String(post.tag_string ?? ""),
         tag_string_artist: String(post.tag_string_artist ?? ""),
         tag_string_copyright: String(post.tag_string_copyright ?? ""),
@@ -472,8 +580,29 @@ app.registerExtension({
             statusEl.className = "dtg-status";
             statusEl.textContent = "Enter tags and click Load. (build hf3)";
 
+            const content = document.createElement("div");
+            content.className = "dtg-content";
+
             const grid = document.createElement("div");
             grid.className = "dtg-grid";
+
+            const pickedPanel = document.createElement("div");
+            pickedPanel.className = "dtg-picked";
+            const pickedHead = document.createElement("div");
+            pickedHead.className = "dtg-picked-head";
+            const pickedTitle = document.createElement("div");
+            pickedTitle.textContent = "Selected Images";
+            const pickedCount = document.createElement("div");
+            pickedCount.textContent = "0";
+            pickedHead.appendChild(pickedTitle);
+            pickedHead.appendChild(pickedCount);
+            const pickedList = document.createElement("div");
+            pickedList.className = "dtg-picked-list";
+            pickedPanel.appendChild(pickedHead);
+            pickedPanel.appendChild(pickedList);
+
+            content.appendChild(grid);
+            content.appendChild(pickedPanel);
 
             const bottom = document.createElement("div");
             bottom.className = "dtg-bottom";
@@ -494,7 +623,7 @@ app.registerExtension({
             root.appendChild(toolbar);
             root.appendChild(categoryBar);
             root.appendChild(statusEl);
-            root.appendChild(grid);
+            root.appendChild(content);
             root.appendChild(bottom);
 
             const uiWidget = this.addDOMWidget("danbooru_gallery_lite_ui", "div", root, { serialize: false });
@@ -511,7 +640,10 @@ app.registerExtension({
                 limitInput,
                 categoryCheckboxes,
                 suggestBox,
+                content,
                 grid,
+                pickedList,
+                pickedCount,
                 page: 1,
                 loading: false,
                 posts: [],
@@ -540,8 +672,8 @@ app.registerExtension({
                     (bottom.offsetHeight || 0) +
                     (gap * 4) +
                     56;
-                const gridHeight = Math.max(180, Math.floor(nodeHeight - nonGridHeight));
-                grid.style.height = `${gridHeight}px`;
+                const contentHeight = Math.max(180, Math.floor(nodeHeight - nonGridHeight));
+                content.style.height = `${contentHeight}px`;
                 if (uiWidget?.element) {
                     uiWidget.element.style.height = `${Math.max(320, nodeHeight - 46)}px`;
                 }
@@ -667,7 +799,7 @@ app.registerExtension({
                 const postMap = new Map(state.posts.map(post => [post.id, post]));
                 let changed = false;
                 state.selectedMap.forEach((value, key) => {
-                    const post = postMap.get(String(key));
+                    const post = postMap.get(String(key)) || value;
                     if (!post) return;
                     const prompt = buildPromptLikeReference(post, selectedCategories);
                     if (value.prompt !== prompt) {
@@ -680,9 +812,74 @@ app.registerExtension({
                 }
             }
 
+            function renderSelectedSidebar() {
+                state.pickedList.innerHTML = "";
+                const selectedItems = Array.from(state.selectedMap.values());
+                state.pickedCount.textContent = String(selectedItems.length);
+                if (!selectedItems.length) {
+                    const empty = document.createElement("div");
+                    empty.className = "dtg-picked-empty";
+                    empty.textContent = "No selected images.";
+                    state.pickedList.appendChild(empty);
+                    return;
+                }
+
+                selectedItems.forEach(item => {
+                    const postId = String(item?.post_id || "");
+                    const row = document.createElement("div");
+                    row.className = "dtg-picked-item";
+
+                    const thumb = document.createElement("img");
+                    thumb.className = "dtg-picked-thumb";
+                    thumb.loading = "lazy";
+                    thumb.src = String(item?.preview_url || item?.image_url || "");
+                    thumb.alt = postId || "selected";
+
+                    const meta = document.createElement("div");
+                    meta.className = "dtg-picked-meta";
+                    const idLine = document.createElement("div");
+                    idLine.className = "dtg-picked-id";
+                    idLine.textContent = postId ? `#${postId}` : "(no id)";
+                    const promptLine = document.createElement("div");
+                    promptLine.className = "dtg-picked-prompt";
+                    promptLine.textContent = String(item?.prompt || item?.tag_string || "").trim() || "(empty prompt)";
+                    meta.appendChild(idLine);
+                    meta.appendChild(promptLine);
+
+                    const removeBtn = document.createElement("button");
+                    removeBtn.className = "dtg-picked-remove";
+                    removeBtn.textContent = "×";
+                    removeBtn.title = "Remove";
+                    removeBtn.onclick = event => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (!postId) return;
+                        state.selectedMap.delete(postId);
+                        saveSelection();
+                        renderPosts();
+                    };
+
+                    row.appendChild(thumb);
+                    row.appendChild(meta);
+                    row.appendChild(removeBtn);
+                    state.pickedList.appendChild(row);
+                });
+            }
+
             function saveSelection() {
                 syncSelectionWidget(state.node, state.selectionWidget, state.selectedMap);
+                renderSelectedSidebar();
                 updateSummary();
+            }
+
+            function getPostAspectRatio(post) {
+                const width = Number(post?.preview_width || post?.image_width || 0);
+                const height = Number(post?.preview_height || post?.image_height || 0);
+                if (width > 0 && height > 0) {
+                    const ratio = width / height;
+                    return Math.max(0.42, Math.min(2.6, ratio));
+                }
+                return 1;
             }
 
             function renderPosts() {
@@ -709,6 +906,18 @@ app.registerExtension({
                     img.src = post.preview_url || "";
                     img.alt = String(post.id || "");
                     img.loading = "lazy";
+                    const thumbWrap = document.createElement("div");
+                    thumbWrap.className = "dtg-thumb-wrap";
+                    thumbWrap.style.aspectRatio = String(getPostAspectRatio(post));
+                    img.onload = () => {
+                        const width = Number(post?.preview_width || post?.image_width || 0);
+                        const height = Number(post?.preview_height || post?.image_height || 0);
+                        if (width > 0 && height > 0) return;
+                        if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+                            const ratio = Math.max(0.42, Math.min(2.6, img.naturalWidth / img.naturalHeight));
+                            thumbWrap.style.aspectRatio = String(ratio);
+                        }
+                    };
                     img.onerror = () => {
                         state.posts = state.posts.filter(p => p.id !== post.id);
                         if (state.selectedMap.has(post.id)) {
@@ -728,7 +937,9 @@ app.registerExtension({
                     checkBadge.className = "dtg-check";
                     checkBadge.textContent = "Selected";
 
-                    card.appendChild(img);
+                    card.dataset.postId = String(post.id || "");
+                    thumbWrap.appendChild(img);
+                    card.appendChild(thumbWrap);
                     card.appendChild(checkBadge);
                     card.appendChild(meta);
                     card.title = buildPromptLikeReference(post, selectedCategories) || post.prompt || "(empty prompt)";

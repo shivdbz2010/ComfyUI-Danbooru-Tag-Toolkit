@@ -621,6 +621,10 @@ def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") 
             "id": post_id,
             "preview_url": preview_url,
             "image_url": image_url,
+            "preview_width": int(item.get("preview_width", 0) or 0),
+            "preview_height": int(item.get("preview_height", 0) or 0),
+            "image_width": int(item.get("image_width", 0) or 0),
+            "image_height": int(item.get("image_height", 0) or 0),
             "tag_string": tag_string,
             "prompt": prompt,
             "score": item.get("score", 0),
@@ -1101,8 +1105,7 @@ class DanbooruTagGalleryLiteNode:
         if not selections:
             return ([_empty_image_tensor()], [""])
 
-        # 与参考节点默认单选体验保持一致：后端最终只输出最后一个选中项，
-        # 避免前端残留多选状态把整页 tag 一次性传给下游。
+        # 可选安全阈值：当 _GALLERY_OUTPUT_SELECTION_LIMIT > 0 时限制输出数量。
         raw_count = len(selections)
         if _GALLERY_OUTPUT_SELECTION_LIMIT > 0 and len(selections) > _GALLERY_OUTPUT_SELECTION_LIMIT:
             selections = selections[-_GALLERY_OUTPUT_SELECTION_LIMIT:]
