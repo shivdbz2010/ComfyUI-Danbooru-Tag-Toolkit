@@ -1,7 +1,10 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 *.pyo
 *.pyd
 .DS_Store
 .idea/
 .vscode/
+prompt_selector/data.json
+prompt_selector/data.json.backup_*
+prompt_selector/preview/

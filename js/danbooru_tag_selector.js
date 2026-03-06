@@ -854,17 +854,32 @@ function sanitizeLegacyWidgetValues(node) {
 
 function parseSelected(rawValue) {
     if (!rawValue) return [];
-    if (Array.isArray(rawValue)) return rawValue.map(v => String(v).trim()).filter(Boolean);
+    if (Array.isArray(rawValue)) return dedupeStringList(rawValue, normalizeTag);
     if (typeof rawValue !== "string") return [];
     try {
         const parsed = JSON.parse(rawValue);
         if (Array.isArray(parsed)) {
-            return parsed.map(v => String(v).trim()).filter(Boolean);
+            return dedupeStringList(parsed, normalizeTag);
         }
     } catch (error) {
         console.warn("[DanbooruTagToolkit] parse selection failed:", error);
     }
     return [];
+}
+
+function dedupeStringList(values, normalize = value => String(value || "").trim().toLowerCase()) {
+    const seen = new Set();
+    const unique = [];
+    const items = Array.isArray(values) ? values : [];
+    items.forEach(value => {
+        const text = String(value || "").trim();
+        if (!text) return;
+        const key = String(normalize(text) || "").trim();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        unique.push(text);
+    });
+    return unique;
 }
 
 function splitTagText(rawValue) {
@@ -1073,7 +1088,7 @@ function normalizeCategories(input) {
             result[category] = [];
             continue;
         }
-        result[category] = tags.map(t => String(t).trim()).filter(Boolean);
+        result[category] = dedupeStringList(tags, normalizeTag);
     }
     return result;
 }
@@ -1180,8 +1195,11 @@ function getSelectedByCategory(state) {
     const byCategory = {};
     for (const category of Object.keys(state.categories)) {
         const row = [];
+        const rowSeen = new Set();
         for (const tag of state.categories[category]) {
-            if (selectedSet.has(normalizeTag(tag))) {
+            const key = normalizeTag(tag);
+            if (selectedSet.has(key) && !rowSeen.has(key)) {
+                rowSeen.add(key);
                 row.push(tag);
             }
         }

@@ -127,7 +127,7 @@ def _normalize_bundle_for_ui(tag_bundle: Dict[str, Any]) -> Dict[str, List[str]]
             tags = [str(t).strip() for t in raw_tags if str(t).strip()]
         else:
             tags = _parse_tag_string(str(raw_tags))
-        normalized[category_key] = tags
+        normalized[category_key] = _dedupe_string_list(tags, unescape_parentheses=True)
     return normalized
 
 
@@ -135,7 +135,7 @@ def _safe_parse_json_list(raw_value: Any, fallback: List[str] = None) -> List[st
     if fallback is None:
         fallback = []
     if isinstance(raw_value, list):
-        return [str(i).strip() for i in raw_value if str(i).strip()]
+        return _dedupe_string_list(raw_value)
     if not isinstance(raw_value, str):
         return fallback
     text = raw_value.strip()
@@ -144,7 +144,7 @@ def _safe_parse_json_list(raw_value: Any, fallback: List[str] = None) -> List[st
     try:
         data = json.loads(text)
         if isinstance(data, list):
-            return [str(i).strip() for i in data if str(i).strip()]
+            return _dedupe_string_list(data)
     except Exception:
         pass
     return fallback
@@ -175,6 +175,25 @@ def _escape_unescaped_parentheses(text: Any) -> str:
     value = re.sub(r'(?<!\\)\(', r'\\(', value)
     value = re.sub(r'(?<!\\)\)', r'\\)', value)
     return value
+
+
+def _dedupe_string_list(values: Any, unescape_parentheses: bool = False) -> List[str]:
+    unique: List[str] = []
+    seen = set()
+    if not isinstance(values, list):
+        return unique
+
+    for item in values:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        normalized = _unescape_comfy_parentheses(text) if unescape_parentheses else text
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(text)
+    return unique
 
 
 def _extract_tags_text_from_payload(raw_value: Any, depth: int = 0) -> str:
@@ -1316,18 +1335,19 @@ class DanbooruTagGalleryLiteNode:
             _escape_unescaped_parentheses(str(p or "").strip()) if str(p or "").strip() else ""
             for p in prompts
         ]
-        merged_prompt_list: List[str] = []
-        seen_prompt = set()
+        merged_prompt_tags: List[str] = []
+        seen_prompt_tags = set()
         for prompt in normalized_prompts:
-            text = str(prompt or "").strip()
-            if not text:
-                continue
-            key = _unescape_comfy_parentheses(text).lower()
-            if key in seen_prompt:
-                continue
-            seen_prompt.add(key)
-            merged_prompt_list.append(text)
-        merged_prompt = ", ".join(merged_prompt_list)
+            for raw_tag in _parse_tag_string(prompt):
+                tag = _escape_unescaped_parentheses(str(raw_tag or "").strip())
+                if not tag:
+                    continue
+                key = _unescape_comfy_parentheses(tag).lower()
+                if key in seen_prompt_tags:
+                    continue
+                seen_prompt_tags.add(key)
+                merged_prompt_tags.append(tag)
+        merged_prompt = ", ".join(merged_prompt_tags)
         first_prompt = normalized_prompts[0] if normalized_prompts else ""
         print(
             f"[DanbooruTagToolkit] Gallery output debug: raw_selections={raw_count}, "
