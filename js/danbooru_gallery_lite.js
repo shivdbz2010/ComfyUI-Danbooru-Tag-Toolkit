@@ -26,7 +26,7 @@ function injectStyle() {
         }
         .dtg-toolbar {
             display: grid;
-            grid-template-columns: minmax(220px, 1fr) 120px 90px auto auto auto;
+            grid-template-columns: minmax(220px, 1fr) 120px 90px auto auto auto 82px auto;
             gap: 8px;
             align-items: center;
         }
@@ -94,6 +94,9 @@ function injectStyle() {
             color: #f0f0f0;
             padding: 0 8px;
             font-size: 12px;
+        }
+        .dtg-page-input {
+            width: 82px;
         }
         .dtg-btn {
             height: 30px;
@@ -529,11 +532,12 @@ app.registerExtension({
             const ratingSelect = document.createElement("select");
             ratingSelect.className = "dtg-select";
             ratingSelect.innerHTML = `
-                <option value="all">all</option>
                 <option value="safe">safe</option>
+                <option value="all">all</option>
                 <option value="questionable">questionable</option>
                 <option value="explicit">explicit</option>
             `;
+            ratingSelect.value = "safe";
 
             const limitInput = document.createElement("input");
             limitInput.className = "dtg-number";
@@ -555,12 +559,26 @@ app.registerExtension({
             nextBtn.className = "dtg-btn";
             nextBtn.textContent = "Next";
 
+            const pageInput = document.createElement("input");
+            pageInput.className = "dtg-number dtg-page-input";
+            pageInput.type = "number";
+            pageInput.min = "1";
+            pageInput.max = "1000";
+            pageInput.value = "1";
+            pageInput.title = "Jump to page";
+
+            const goBtn = document.createElement("button");
+            goBtn.className = "dtg-btn";
+            goBtn.textContent = "Go";
+
             toolbar.appendChild(searchWrap);
             toolbar.appendChild(ratingSelect);
             toolbar.appendChild(limitInput);
             toolbar.appendChild(loadBtn);
             toolbar.appendChild(prevBtn);
             toolbar.appendChild(nextBtn);
+            toolbar.appendChild(pageInput);
+            toolbar.appendChild(goBtn);
 
             const categoryBar = document.createElement("div");
             categoryBar.className = "dtg-categories";
@@ -642,6 +660,7 @@ app.registerExtension({
                 searchInput,
                 ratingSelect,
                 limitInput,
+                pageInput,
                 categoryCheckboxes,
                 suggestBox,
                 content,
@@ -701,6 +720,9 @@ app.registerExtension({
 
             function updateSummary() {
                 state.summaryEl.textContent = `Page: ${state.page} | Posts: ${state.posts.length} | Selected: ${state.selectedMap.size}`;
+                if (state.pageInput) {
+                    state.pageInput.value = String(Math.max(1, Number(state.page || 1)));
+                }
             }
 
             function getSelectedCategories() {
@@ -715,7 +737,7 @@ app.registerExtension({
             function syncStateWidget(includePosts = false) {
                 const payload = {
                     search: String(state.searchInput.value || ""),
-                    rating: String(state.ratingSelect.value || "all"),
+                    rating: String(state.ratingSelect.value || "safe"),
                     limit: Math.max(1, Math.min(100, Number(state.limitInput.value || 24))),
                     page: Math.max(1, Number(state.page || 1)),
                     scroll_top: Math.max(0, Number(state.grid.scrollTop || 0)),
@@ -871,7 +893,10 @@ app.registerExtension({
                         if (!postId) return;
                         state.selectedMap.delete(postId);
                         saveSelection();
-                        renderPosts();
+                        const card = state.grid.querySelector(`.dtg-card[data-post-id="${CSS.escape(postId)}"]`);
+                        if (card) {
+                            card.classList.remove("selected");
+                        }
                     };
 
                     row.appendChild(thumb);
@@ -1020,7 +1045,7 @@ app.registerExtension({
                 state.page = Math.max(1, Number(page || 1));
 
                 const tags = normalizeSearchForApi(state.searchInput.value || "");
-                const rating = state.ratingSelect.value || "all";
+                const rating = state.ratingSelect.value || "safe";
                 const limit = Math.max(1, Math.min(100, Number(state.limitInput.value || 24)));
                 state.limitInput.value = String(limit);
 
@@ -1109,8 +1134,8 @@ app.registerExtension({
                 if (cb) cb.checked = restoredCategories.includes(key);
             });
             searchInput.value = String(uiState.search || "");
-            const rating = String(uiState.rating || "all");
-            ratingSelect.value = ["all", "safe", "questionable", "explicit"].includes(rating) ? rating : "all";
+            const rating = String(uiState.rating || "safe");
+            ratingSelect.value = ["all", "safe", "questionable", "explicit"].includes(rating) ? rating : "safe";
             const limit = Math.max(1, Math.min(100, Number(uiState.limit || 24)));
             limitInput.value = String(limit);
             state.page = Math.max(1, Number(uiState.page || 1));
@@ -1136,6 +1161,12 @@ app.registerExtension({
             loadBtn.onclick = () => loadPosts(1);
             prevBtn.onclick = () => loadPosts(Math.max(1, state.page - 1));
             nextBtn.onclick = () => loadPosts(state.page + 1);
+            const commitPageJump = () => {
+                const page = Math.max(1, Math.min(1000, Number(pageInput.value || state.page || 1)));
+                pageInput.value = String(page);
+                loadPosts(page);
+            };
+            goBtn.onclick = commitPageJump;
             clearCacheBtn.onclick = () => {
                 clearServerCache();
             };
@@ -1169,6 +1200,16 @@ app.registerExtension({
                 const limit = Math.max(1, Math.min(100, Number(limitInput.value || 24)));
                 limitInput.value = String(limit);
                 syncStateWidget(false);
+            });
+            pageInput.addEventListener("change", () => {
+                const page = Math.max(1, Math.min(1000, Number(pageInput.value || state.page || 1)));
+                pageInput.value = String(page);
+            });
+            pageInput.addEventListener("keydown", event => {
+                if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitPageJump();
+                }
             });
             categoryCheckboxes.forEach(checkbox => {
                 checkbox.addEventListener("change", () => {
@@ -1209,8 +1250,8 @@ app.registerExtension({
 
             const uiState = parseJsonObject(state.stateWidget?.value, {});
             state.searchInput.value = String(uiState.search || "");
-            const rating = String(uiState.rating || "all");
-            state.ratingSelect.value = ["all", "safe", "questionable", "explicit"].includes(rating) ? rating : "all";
+            const rating = String(uiState.rating || "safe");
+            state.ratingSelect.value = ["all", "safe", "questionable", "explicit"].includes(rating) ? rating : "safe";
             const limit = Math.max(1, Math.min(100, Number(uiState.limit || 24)));
             state.limitInput.value = String(limit);
             state.page = Math.max(1, Number(uiState.page || 1));

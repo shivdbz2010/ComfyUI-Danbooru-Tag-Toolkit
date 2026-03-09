@@ -36,6 +36,7 @@ const I18N = {
         row_add_tags: "Add tags",
         row_add_btn: "Add",
         row_add_ph: "tag1, tag2",
+        row_weight_title: "Row weight",
         empty_preview: "(empty)",
         meta_line: "Output tags: {output} | Selected tags: {selected} | Selected categories: {categories}",
         status_ready: "Ready.",
@@ -113,6 +114,7 @@ const I18N = {
         row_add_tags: "添加标签",
         row_add_btn: "添加",
         row_add_ph: "标签1, 标签2",
+        row_weight_title: "分类行权重",
         empty_preview: "(空)",
         meta_line: "输出标签: {output} | 已选标签: {selected} | 已选分类: {categories}",
         status_ready: "就绪。",
@@ -541,6 +543,27 @@ function injectStyle() {
             gap: 4px;
             align-items: center;
         }
+        .dts-weight-input {
+            width: 52px;
+            height: 24px;
+            border: 1px solid #4b648b;
+            border-radius: 6px;
+            background: #0f1b2d;
+            color: #e6f0ff;
+            font-size: 11px;
+            line-height: 1;
+            text-align: center;
+            outline: none;
+            padding: 0 6px;
+            box-sizing: border-box;
+        }
+        .dts-weight-input:hover {
+            border-color: #6a8fc1;
+        }
+        .dts-weight-input:focus {
+            border-color: #79a6de;
+            box-shadow: 0 0 0 1px rgba(121, 166, 222, .24);
+        }
         .dts-icon {
             width: 24px;
             height: 24px;
@@ -815,7 +838,53 @@ function sanitizeLegacyWidgetValues(node) {
     const selectedWidget = getWidget(node, "selected_tags_json");
     const selectedCategoriesWidget = getWidget(node, "selected_categories_json");
     const manualCategoryTagsWidget = getWidget(node, "manual_category_tags_json");
+    const selectedCategoryWeightsWidget = getWidget(node, "selected_category_weights_json");
+    const prefixWidget = getWidget(node, "prefix_text");
     const separatorWidget = getWidget(node, "separator");
+    const useAllWidget = getWidget(node, "use_all_when_empty");
+    const dedupeWidget = getWidget(node, "deduplicate_selected");
+    const trailingWidget = getWidget(node, "keep_trailing_comma");
+
+    const rawWeights = String(selectedCategoryWeightsWidget?.value ?? "");
+    const rawPrefix = String(prefixWidget?.value ?? "");
+    const rawSeparator = separatorWidget?.value;
+    const rawUseAll = useAllWidget?.value;
+    const rawDedupe = dedupeWidget?.value;
+    const prefixLooksLikeSeparator = ["comma", "space", "newline"].includes(rawPrefix.trim().toLowerCase());
+    const separatorLooksLikeBoolean = typeof rawSeparator === "boolean"
+        || ["", "0", "1", "false", "true", "no", "yes", "off", "on"].includes(String(rawSeparator ?? "").trim().toLowerCase());
+    const weightsLookLikeLegacyPrefix = !rawWeights.trim()
+        || (!rawWeights.trim().startsWith("{") && !rawWeights.trim().startsWith("["));
+
+    // Migrate old workflows saved before selected_category_weights_json was inserted.
+    if (
+        selectedCategoryWeightsWidget
+        && prefixWidget
+        && separatorWidget
+        && useAllWidget
+        && dedupeWidget
+        && trailingWidget
+        && prefixLooksLikeSeparator
+        && separatorLooksLikeBoolean
+        && weightsLookLikeLegacyPrefix
+    ) {
+        setWidgetValue(selectedCategoryWeightsWidget, "{}");
+        setWidgetValue(prefixWidget, rawWeights);
+        setWidgetValue(separatorWidget, normalizeSeparatorValue(rawPrefix));
+        setWidgetValue(useAllWidget, normalizeBooleanValue(rawSeparator, true));
+        setWidgetValue(dedupeWidget, normalizeBooleanValue(rawUseAll, true));
+        setWidgetValue(trailingWidget, normalizeBooleanValue(rawDedupe, true));
+    }
+
+    // Some already-saved broken workflows only retain the stale separator token in prefix_text.
+    if (prefixWidget && separatorWidget && selectedCategoryWeightsWidget) {
+        const normalizedPrefix = String(prefixWidget.value ?? "").trim().toLowerCase();
+        const normalizedSeparator = normalizeSeparatorValue(separatorWidget.value);
+        const hasRowWeights = Object.keys(parseSelectedCategoryWeights(selectedCategoryWeightsWidget.value)).length > 0;
+        if (!hasRowWeights && ["comma", "space", "newline"].includes(normalizedPrefix) && normalizedPrefix === normalizedSeparator) {
+            setWidgetValue(prefixWidget, "");
+        }
+    }
 
     if (selectedWidget) {
         const normalizedSelection = JSON.stringify(parseSelected(selectedWidget.value));
@@ -835,7 +904,12 @@ function sanitizeLegacyWidgetValues(node) {
             setWidgetValue(manualCategoryTagsWidget, normalizedManual);
         }
     }
-
+    if (selectedCategoryWeightsWidget) {
+        const normalizedWeights = JSON.stringify(parseSelectedCategoryWeights(selectedCategoryWeightsWidget.value));
+        if (String(selectedCategoryWeightsWidget.value ?? "") !== normalizedWeights) {
+            setWidgetValue(selectedCategoryWeightsWidget, normalizedWeights);
+        }
+    }
     if (separatorWidget) {
         const normalizedSeparator = normalizeSeparatorValue(separatorWidget.value);
         if (String(separatorWidget.value ?? "") !== normalizedSeparator) {
@@ -843,9 +917,9 @@ function sanitizeLegacyWidgetValues(node) {
         }
     }
 
-    coerceBoolWidget(getWidget(node, "use_all_when_empty"), true);
-    coerceBoolWidget(getWidget(node, "deduplicate_selected"), true);
-    coerceBoolWidget(getWidget(node, "keep_trailing_comma"), true);
+    coerceBoolWidget(useAllWidget, true);
+    coerceBoolWidget(dedupeWidget, true);
+    coerceBoolWidget(trailingWidget, true);
     coerceBoolWidget(getWidget(node, "deduplicate_tags"), false);
     coerceBoolWidget(getWidget(node, "validation"), true);
     coerceBoolWidget(getWidget(node, "force_reload"), false);
@@ -941,6 +1015,42 @@ function normalizeTag(tag) {
 
 function normalizeCategory(category) {
     return String(category || "").trim().toLowerCase();
+}
+
+function normalizeWeightValue(rawValue, fallback = 1) {
+    if (rawValue === "" || rawValue == null) return fallback;
+    const parsed = Number.parseFloat(rawValue);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(0, Math.min(20, Math.round(parsed * 100) / 100));
+}
+
+function formatWeightValue(rawValue, fallback = "1") {
+    const normalized = normalizeWeightValue(rawValue, Number.NaN);
+    if (!Number.isFinite(normalized)) return fallback;
+    return normalized.toFixed(2).replace(/\.?0+$/, "") || fallback;
+}
+
+function parseSelectedCategoryWeights(rawValue) {
+    if (!rawValue) return {};
+    let parsed = rawValue;
+    if (typeof rawValue === "string") {
+        try {
+            parsed = JSON.parse(rawValue);
+        } catch {
+            return {};
+        }
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const result = {};
+    for (const [category, weight] of Object.entries(parsed)) {
+        const key = String(category || "").trim();
+        if (!key) continue;
+        const normalizedWeight = normalizeWeightValue(weight, 1);
+        if (normalizedWeight !== 1) {
+            result[key] = normalizedWeight;
+        }
+    }
+    return result;
 }
 
 function getInputSlot(node, name) {
@@ -1314,6 +1424,26 @@ function appendTrailing(text, separator, keepTrailing) {
     return `${text}, `;
 }
 
+function getResolvedSelectedCategoryWeights(state) {
+    const lookup = {};
+    for (const category of Object.keys(state.categories || {})) {
+        const key = normalizeCategory(category);
+        if (!(key in lookup)) {
+            lookup[key] = category;
+        }
+    }
+
+    const resolved = {};
+    for (const [category, rawWeight] of Object.entries(state.selectedCategoryWeights || {})) {
+        const key = normalizeCategory(category);
+        if (!key) continue;
+        const resolvedCategory = lookup[key] || String(category || "").trim();
+        if (!resolvedCategory) continue;
+        resolved[resolvedCategory] = normalizeWeightValue(rawWeight, 1);
+    }
+    return resolved;
+}
+
 function getOutputTagsForPreview(node) {
     const state = node.__dtsState;
     if (!state) return [];
@@ -1366,15 +1496,83 @@ function getOutputTagsForPreview(node) {
     return mergedTags;
 }
 
+function getOutputPartsForPreview(node) {
+    const state = node.__dtsState;
+    if (!state) return [];
+
+    const selectedTags = getOrderedSelectedTags(state);
+    const selectedTagSet = new Set(selectedTags.map(normalizeTag));
+    const explicitCategories = getExplicitSelectedCategories(state);
+    const explicitSet = new Set(explicitCategories.map(normalizeCategory));
+    const activeCategories = getActiveSelectedCategories(state);
+    const useAllWhenEmpty = normalizeBooleanValue(getWidgetValue(node, "use_all_when_empty", true), true);
+    const deduplicateSelected = normalizeBooleanValue(getWidgetValue(node, "deduplicate_selected", true), true);
+    const categoryWeights = getResolvedSelectedCategoryWeights(state);
+
+    if (!selectedTags.length && !activeCategories.length) {
+        return useAllWhenEmpty ? getOutputTagsForPreview(node) : [];
+    }
+
+    const parts = [];
+    const assignedKeys = new Set();
+    const dedupeKeys = new Set();
+
+    activeCategories.forEach(category => {
+        const categoryTags = Array.isArray(state.categories?.[category]) ? state.categories[category] : [];
+        let rowTags = [];
+        if (selectedTagSet.size) {
+            rowTags = categoryTags.filter(tag => selectedTagSet.has(normalizeTag(tag)));
+        }
+        if (!rowTags.length && explicitSet.has(normalizeCategory(category))) {
+            rowTags = [...categoryTags];
+        }
+
+        const rowOutput = [];
+        const rowSeen = new Set();
+        rowTags.forEach(tag => {
+            const text = String(tag || "").trim();
+            const key = normalizeTag(text);
+            if (!key || rowSeen.has(key)) return;
+            if (deduplicateSelected && dedupeKeys.has(key)) return;
+            rowSeen.add(key);
+            assignedKeys.add(key);
+            if (deduplicateSelected) {
+                dedupeKeys.add(key);
+            }
+            rowOutput.push(text);
+        });
+
+        if (!rowOutput.length) return;
+
+        const rowText = rowOutput.join(", ");
+        const weight = normalizeWeightValue(categoryWeights[category], 1);
+        parts.push(weight !== 1 ? `(${rowText}:${formatWeightValue(weight)})` : rowText);
+    });
+
+    selectedTags.forEach(tag => {
+        const text = String(tag || "").trim();
+        const key = normalizeTag(text);
+        if (!key || assignedKeys.has(key)) return;
+        if (deduplicateSelected && dedupeKeys.has(key)) return;
+        assignedKeys.add(key);
+        if (deduplicateSelected) {
+            dedupeKeys.add(key);
+        }
+        parts.push(text);
+    });
+
+    return parts;
+}
+
 function buildPreview(node) {
     const state = node.__dtsState;
     if (!state) return "";
 
-    const outputTags = getOutputTagsForPreview(node);
+    const outputParts = getOutputPartsForPreview(node);
     const separator = normalizeSeparatorValue(getWidgetValue(node, "separator", "comma"));
     const keepTrailing = normalizeBooleanValue(getWidgetValue(node, "keep_trailing_comma", true), true);
     const prefix = String(getWidgetValue(node, "prefix_text", "") || "").trim();
-    const selectedText = appendTrailing(joinSelected(outputTags, separator), separator, keepTrailing);
+    const selectedText = appendTrailing(joinSelected(outputParts, separator), separator, keepTrailing);
 
     if (prefix && selectedText) {
         if (separator === "newline") return `${prefix}\n${selectedText}`;
@@ -1391,6 +1589,7 @@ function syncSelectedWidget(node, markDirty = true) {
 
     const orderedTags = getOrderedSelectedTags(state);
     setWidgetValue(state.selectedWidget, JSON.stringify(orderedTags));
+    syncSelectedCategoryWeightsWidget(node, false);
 
     if (markDirty) {
         node.setDirtyCanvas(true, true);
@@ -1422,6 +1621,37 @@ function syncSelectedCategoriesWidget(node, markDirty = true) {
 
     state.selectedCategories = [...ordered];
     setWidgetValue(state.selectedCategoriesWidget, JSON.stringify(ordered));
+    syncSelectedCategoryWeightsWidget(node, false);
+
+    if (markDirty) {
+        node.setDirtyCanvas(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+    }
+}
+
+function syncSelectedCategoryWeightsWidget(node, markDirty = true) {
+    const state = node.__dtsState;
+    if (!state?.selectedCategoryWeightsWidget) return;
+
+    const activeCategories = getActiveSelectedCategories(state);
+    const sourceWeights = {};
+    for (const [category, rawWeight] of Object.entries(state.selectedCategoryWeights || {})) {
+        const key = normalizeCategory(category);
+        if (!key || key in sourceWeights) continue;
+        sourceWeights[key] = normalizeWeightValue(rawWeight, 1);
+    }
+
+    const orderedWeights = {};
+    activeCategories.forEach(category => {
+        const key = normalizeCategory(category);
+        const weight = normalizeWeightValue(sourceWeights[key], 1);
+        if (weight !== 1) {
+            orderedWeights[category] = weight;
+        }
+    });
+
+    state.selectedCategoryWeights = orderedWeights;
+    setWidgetValue(state.selectedCategoryWeightsWidget, JSON.stringify(orderedWeights));
 
     if (markDirty) {
         node.setDirtyCanvas(true, true);
@@ -1461,6 +1691,29 @@ function pruneCategorySelectionByAvailability(state) {
         next.push(resolved);
     }
     state.selectedCategories = next;
+}
+
+function pruneSelectedCategoryWeightsByAvailability(state) {
+    const lookup = {};
+    for (const category of Object.keys(state.categories || {})) {
+        const key = normalizeCategory(category);
+        if (!(key in lookup)) {
+            lookup[key] = category;
+        }
+    }
+
+    const next = {};
+    const seen = new Set();
+    for (const [category, rawWeight] of Object.entries(state.selectedCategoryWeights || {})) {
+        const key = normalizeCategory(category);
+        const resolved = lookup[key];
+        if (!resolved || seen.has(key)) continue;
+        const weight = normalizeWeightValue(rawWeight, 1);
+        if (weight === 1) continue;
+        seen.add(key);
+        next[resolved] = weight;
+    }
+    state.selectedCategoryWeights = next;
 }
 
 function scheduleRefresh(node, delay = 420) {
@@ -1892,9 +2145,11 @@ async function refreshCategories(node) {
 
         pruneSelectionByAvailability(state);
         pruneCategorySelectionByAvailability(state);
+        pruneSelectedCategoryWeightsByAvailability(state);
         updateCategoryOrderFromSelection(state);
         syncSelectedWidget(node, false);
         syncSelectedCategoriesWidget(node, false);
+        syncSelectedCategoryWeightsWidget(node, false);
 
         const count = Object.keys(state.categories).length;
         const statusKey = count > 0
@@ -2011,10 +2266,18 @@ function removeSelectedCategory(node, category) {
         });
         syncManualTagsWidget(node, false);
     }
+    if (state.selectedCategoryWeights && typeof state.selectedCategoryWeights === "object") {
+        Object.keys(state.selectedCategoryWeights).forEach(key => {
+            if (normalizeCategory(key) === normalizeCategory(category)) {
+                delete state.selectedCategoryWeights[key];
+            }
+        });
+    }
 
     updateCategoryOrderFromSelection(state);
     syncSelectedWidget(node, false);
-    syncSelectedCategoriesWidget(node);
+    syncSelectedCategoriesWidget(node, false);
+    syncSelectedCategoryWeightsWidget(node);
     renderAll(node);
 }
 
@@ -2026,6 +2289,35 @@ function moveCategoryOrder(state, from, to) {
     const [moved] = arr.splice(from, 1);
     arr.splice(to, 0, moved);
     state.categoryOrder = arr;
+}
+
+function setCategoryRowWeight(node, category, rawWeight) {
+    const state = node.__dtsState;
+    if (!state) return 1;
+
+    const resolvedCategory = resolveCategoryName(state.categories || {}, category);
+    if (!resolvedCategory) return 1;
+
+    if (!state.selectedCategoryWeights || typeof state.selectedCategoryWeights !== "object") {
+        state.selectedCategoryWeights = {};
+    }
+
+    Object.keys(state.selectedCategoryWeights).forEach(key => {
+        if (normalizeCategory(key) === normalizeCategory(resolvedCategory) && key !== resolvedCategory) {
+            delete state.selectedCategoryWeights[key];
+        }
+    });
+
+    const weight = normalizeWeightValue(rawWeight, 1);
+    if (weight === 1) {
+        delete state.selectedCategoryWeights[resolvedCategory];
+    } else {
+        state.selectedCategoryWeights[resolvedCategory] = weight;
+    }
+
+    syncSelectedCategoryWeightsWidget(node);
+    renderPreview(node);
+    return weight;
 }
 
 function renderCategoryFilter(node) {
@@ -2366,6 +2658,37 @@ function renderSelected(node) {
         const actions = document.createElement("div");
         actions.className = "dts-selected-actions";
 
+        const currentWeight = normalizeWeightValue((state.selectedCategoryWeights || {})[category], 1);
+        const weightInput = document.createElement("input");
+        weightInput.type = "text";
+        weightInput.className = "dts-weight-input";
+        weightInput.value = formatWeightValue(currentWeight);
+        weightInput.placeholder = "1";
+        weightInput.title = tr(state, "row_weight_title");
+        weightInput.setAttribute("aria-label", tr(state, "row_weight_title"));
+        const applyWeight = () => {
+            const nextWeight = setCategoryRowWeight(node, category, weightInput.value);
+            weightInput.value = formatWeightValue(nextWeight);
+        };
+        weightInput.addEventListener("input", event => {
+            if (event.target.value !== "" && !/^\d*\.?\d{0,2}$/.test(event.target.value)) {
+                event.target.value = event.target.value.slice(0, -1);
+            }
+        });
+        weightInput.addEventListener("focus", event => event.target.select());
+        weightInput.addEventListener("blur", applyWeight);
+        weightInput.addEventListener("keydown", event => {
+            event.stopPropagation();
+            if (event.key === "Enter") {
+                event.preventDefault();
+                applyWeight();
+                weightInput.blur();
+            }
+        });
+        ["mousedown", "click", "pointerdown"].forEach(eventName => {
+            weightInput.addEventListener(eventName, event => event.stopPropagation());
+        });
+
         const upBtn = document.createElement("button");
         upBtn.className = "dts-icon";
         upBtn.textContent = "↑";
@@ -2396,6 +2719,7 @@ function renderSelected(node) {
         removeBtn.title = "Clear this category";
         removeBtn.onclick = () => removeSelectedCategory(node, category);
 
+        actions.appendChild(weightInput);
         actions.appendChild(upBtn);
         actions.appendChild(downBtn);
         actions.appendChild(removeBtn);
@@ -2992,6 +3316,7 @@ app.registerExtension({
             const selectedWidget = getWidget(this, "selected_tags_json");
             const selectedCategoriesWidget = getWidget(this, "selected_categories_json");
             const manualCategoryTagsWidget = getWidget(this, "manual_category_tags_json");
+            const selectedCategoryWeightsWidget = getWidget(this, "selected_category_weights_json");
             const prefixWidget = getWidget(this, "prefix_text");
             const separatorWidget = getWidget(this, "separator");
             const useAllWidget = getWidget(this, "use_all_when_empty");
@@ -3013,7 +3338,7 @@ app.registerExtension({
 
             sanitizeLegacyWidgetValues(this);
 
-            [selectedWidget, selectedCategoriesWidget, manualCategoryTagsWidget, prefixWidget, separatorWidget, useAllWidget, dedupeWidget, trailingWidget].forEach(hideWidget);
+            [selectedWidget, selectedCategoriesWidget, manualCategoryTagsWidget, selectedCategoryWeightsWidget, prefixWidget, separatorWidget, useAllWidget, dedupeWidget, trailingWidget].forEach(hideWidget);
             if (isIntegratedNode) {
                 [
                     excelWidget,
@@ -3188,6 +3513,7 @@ app.registerExtension({
                 selectedWidget,
                 selectedCategoriesWidget,
                 manualCategoryTagsWidget,
+                selectedCategoryWeightsWidget,
                 prefixWidget,
                 separatorWidget,
                 useAllWidget,
@@ -3211,6 +3537,7 @@ app.registerExtension({
                 selected: parseSelected(selectedWidget?.value),
                 selectedCategories: parseSelected(selectedCategoriesWidget?.value),
                 manualCategoryTags: parseManualCategoryTags(manualCategoryTagsWidget?.value),
+                selectedCategoryWeights: parseSelectedCategoryWeights(selectedCategoryWeightsWidget?.value),
                 categoryOrder: [],
                 dragIndex: null,
                 refreshTimer: null,
@@ -3270,10 +3597,12 @@ app.registerExtension({
                 state.selected = [];
                 state.selectedCategories = [];
                 state.manualCategoryTags = {};
+                state.selectedCategoryWeights = {};
                 state.categoryOrder = [];
                 syncManualTagsWidget(this, false);
                 syncSelectedWidget(this, false);
-                syncSelectedCategoriesWidget(this);
+                syncSelectedCategoriesWidget(this, false);
+                syncSelectedCategoryWeightsWidget(this);
                 renderAll(this);
                 if (state.isIntegrated) {
                     scheduleRefresh(this, 120);
@@ -3330,6 +3659,7 @@ app.registerExtension({
             state.selected = parseSelected(state.selectedWidget?.value);
             state.selectedCategories = parseSelected(state.selectedCategoriesWidget?.value);
             state.manualCategoryTags = parseManualCategoryTags(state.manualCategoryTagsWidget?.value);
+            state.selectedCategoryWeights = parseSelectedCategoryWeights(state.selectedCategoryWeightsWidget?.value);
             applyManualTagsToCategories(state);
             syncSettingsFromWidgets(this);
             updateCategoryOrderFromSelection(state);
@@ -3349,6 +3679,7 @@ app.registerExtension({
                 "selected_tags_json",
                 "selected_categories_json",
                 "manual_category_tags_json",
+                "selected_category_weights_json",
                 "prefix_text",
                 "separator",
                 "use_all_when_empty",
@@ -3382,8 +3713,11 @@ app.registerExtension({
                     pruneSelectionByAvailability(state);
                     updateCategoryOrderFromSelection(state);
                 }
+                if (widget.name === "selected_category_weights_json") {
+                    state.selectedCategoryWeights = parseSelectedCategoryWeights(state.selectedCategoryWeightsWidget?.value);
+                }
                 syncSettingsFromWidgets(this);
-                if (widget.name === "selected_tags_json" || widget.name === "selected_categories_json" || widget.name === "manual_category_tags_json") {
+                if (widget.name === "selected_tags_json" || widget.name === "selected_categories_json" || widget.name === "manual_category_tags_json" || widget.name === "selected_category_weights_json") {
                     renderAll(this);
                 } else {
                     renderPreview(this);

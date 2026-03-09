@@ -150,6 +150,96 @@ def _safe_parse_json_list(raw_value: Any, fallback: List[str] = None) -> List[st
     return fallback
 
 
+def _safe_parse_json_weight_map(raw_value: Any) -> Dict[str, float]:
+    if isinstance(raw_value, dict):
+        data = raw_value
+    elif isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return {}
+        try:
+            data = json.loads(text)
+        except Exception:
+            return {}
+    else:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    result: Dict[str, float] = {}
+    for raw_key, raw_weight in data.items():
+        key = str(raw_key or '').strip()
+        if not key:
+            continue
+        try:
+            weight = round(float(raw_weight), 2)
+        except (TypeError, ValueError):
+            continue
+        result[key] = max(0.0, min(20.0, weight))
+    return result
+
+
+def _merge_manual_tags_into_bundle(
+    normalized_bundle: Dict[str, List[str]],
+    manual_category_tags_json: Any,
+) -> Dict[str, List[str]]:
+    merged_bundle: Dict[str, List[str]] = {
+        str(category): list(tags)
+        for category, tags in (normalized_bundle or {}).items()
+    }
+
+    if isinstance(manual_category_tags_json, dict):
+        manual_tags = manual_category_tags_json
+    elif isinstance(manual_category_tags_json, str):
+        text = manual_category_tags_json.strip()
+        if not text:
+            return merged_bundle
+        try:
+            manual_tags = json.loads(text)
+        except Exception:
+            return merged_bundle
+    else:
+        return merged_bundle
+
+    if not isinstance(manual_tags, dict):
+        return merged_bundle
+
+    category_lookup: Dict[str, str] = {}
+    for category in merged_bundle.keys():
+        normalized_key = str(category).strip().lower()
+        if normalized_key and normalized_key not in category_lookup:
+            category_lookup[normalized_key] = category
+
+    for raw_category, raw_tags in manual_tags.items():
+        category_key = str(raw_category or '').strip()
+        if not category_key:
+            continue
+        resolved_category = category_lookup.get(category_key.lower(), category_key)
+        if isinstance(raw_tags, list):
+            next_tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+        else:
+            next_tags = _parse_tag_string(str(raw_tags))
+        if not next_tags:
+            continue
+        existing_tags = list(merged_bundle.get(resolved_category, []))
+        merged_bundle[resolved_category] = _dedupe_string_list(existing_tags + next_tags, unescape_parentheses=True)
+        normalized_key = resolved_category.strip().lower()
+        if normalized_key and normalized_key not in category_lookup:
+            category_lookup[normalized_key] = resolved_category
+
+    return merged_bundle
+
+
+def _format_prompt_weight(weight: Any) -> str:
+    try:
+        normalized = round(float(weight), 2)
+    except (TypeError, ValueError):
+        normalized = 1.0
+    text = f"{normalized:.2f}".rstrip('0').rstrip('.')
+    return text or '1'
+
+
 def _as_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -236,10 +326,101 @@ def _build_specificity_variants(tag: Any, match_singular_plural: bool = True) ->
     return variants
 
 
-def _parse_tag_text_block(raw_value: Any) -> List[str]:
-    if not isinstance(raw_value, str):
+def _split_top_level_prompt_parts(raw_value: Any) -> List[str]:
+    text = str(raw_value or "")
+    if not text:
         return []
-    return [part.strip() for part in re.split(r"[,\r\n]+", raw_value) if part.strip()]
+
+    parts: List[str] = []
+    current: List[str] = []
+    depth = 0
+    escaped = False
+
+    for char in text:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+
+        if char == "(":
+            depth += 1
+            current.append(char)
+            continue
+
+        if char == ")":
+            if depth > 0:
+                depth -= 1
+            current.append(char)
+            continue
+
+        if depth == 0 and char in {",", "\r", "\n"}:
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+
+        current.append(char)
+
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+def _parse_tag_text_block(raw_value: Any) -> List[str]:
+    return _split_top_level_prompt_parts(raw_value)
+
+
+def _parse_weighted_prompt_part(raw_value: Any) -> Dict[str, Any]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return {}
+
+    match = re.match(r'^\((.*):\s*([-+]?(?:\d+(?:\.\d+)?|\.\d+))\)$', text, flags=re.S)
+    if not match:
+        return {}
+
+    inner_text = str(match.group(1) or "").strip()
+    weight_text = str(match.group(2) or "").strip()
+    inner_tags = _split_top_level_prompt_parts(inner_text)
+    if not inner_tags or not weight_text:
+        return {}
+
+    return {
+        "type": "weighted",
+        "tags": inner_tags,
+        "weight": weight_text,
+    }
+
+
+def _parse_prompt_segments(raw_value: Any) -> List[Dict[str, Any]]:
+    segments: List[Dict[str, Any]] = []
+    for part in _split_top_level_prompt_parts(raw_value):
+        weighted = _parse_weighted_prompt_part(part)
+        if weighted:
+            segments.append(weighted)
+        else:
+            segments.append({
+                "type": "plain",
+                "tag": str(part or "").strip(),
+            })
+    return segments
+
+
+def _build_weighted_prompt_part(tags: List[str], weight: Any) -> str:
+    cleaned_tags = [
+        _escape_unescaped_parentheses(str(tag or "").strip())
+        for tag in tags
+        if str(tag or "").strip()
+    ]
+    if not cleaned_tags:
+        return ""
+    return f"({', '.join(cleaned_tags)}:{_format_prompt_weight(weight)})"
 
 
 def _join_tag_text(tags: List[str], keep_trailing_comma: bool = False) -> str:
@@ -250,7 +431,6 @@ def _join_tag_text(tags: List[str], keep_trailing_comma: bool = False) -> str:
     if keep_trailing_comma:
         return result + ", "
     return result
-
 
 def _unwrap_list_input(value: Any, default: Any = None) -> Any:
     if isinstance(value, list):
@@ -297,15 +477,13 @@ def _tag_is_covered_by_specific_variant(
     return False
 
 
-def _clean_specificity_prompt(
-    raw_prompt: Any,
+def _clean_specificity_tag_list(
+    candidate_tags: List[str],
     preserve_tags_text: Any = "",
     match_singular_plural: bool = True,
     min_prefix_words: int = 1,
-    keep_trailing_comma: bool = False,
-) -> Dict[str, Any]:
-    source_text = str(raw_prompt or "")
-    candidate_tags = _dedupe_string_list(_parse_tag_text_block(source_text), unescape_parentheses=True)
+) -> Dict[str, List[str]]:
+    normalized_candidates = _dedupe_string_list(candidate_tags, unescape_parentheses=True)
 
     preserve_variants = set()
     for preserve_tag in _parse_tag_text_block(str(preserve_tags_text or "")):
@@ -314,7 +492,7 @@ def _clean_specificity_prompt(
     cleaned_tags: List[str] = []
     removed_tags: List[str] = []
 
-    for tag in candidate_tags:
+    for tag in normalized_candidates:
         tag_variants = _build_specificity_variants(tag, match_singular_plural)
         if any(variant in preserve_variants for variant in tag_variants):
             cleaned_tags.append(tag)
@@ -322,7 +500,7 @@ def _clean_specificity_prompt(
 
         if _tag_is_covered_by_specific_variant(
             base_tag=tag,
-            candidate_tags=candidate_tags,
+            candidate_tags=normalized_candidates,
             match_singular_plural=match_singular_plural,
             min_prefix_words=min_prefix_words,
         ):
@@ -331,31 +509,119 @@ def _clean_specificity_prompt(
 
         cleaned_tags.append(tag)
 
-    escaped_cleaned_tags = [_escape_unescaped_parentheses(tag) for tag in cleaned_tags]
-    escaped_removed_tags = [_escape_unescaped_parentheses(tag) for tag in removed_tags]
     return {
-        "cleaned_tags": escaped_cleaned_tags,
+        "cleaned_tags": cleaned_tags,
+        "removed_tags": removed_tags,
+    }
+
+
+def _clean_specificity_prompt(
+    raw_prompt: Any,
+    preserve_tags_text: Any = "",
+    match_singular_plural: bool = True,
+    min_prefix_words: int = 1,
+    keep_trailing_comma: bool = False,
+) -> Dict[str, Any]:
+    source_text = str(raw_prompt or "")
+    segments = _parse_prompt_segments(source_text)
+    flat_candidate_tags: List[str] = []
+    for segment in segments:
+        if segment.get("type") == "weighted":
+            flat_candidate_tags.extend(segment.get("tags", []))
+        else:
+            tag = str(segment.get("tag") or "").strip()
+            if tag:
+                flat_candidate_tags.append(tag)
+
+    cleaned_result = _clean_specificity_tag_list(
+        candidate_tags=flat_candidate_tags,
+        preserve_tags_text=preserve_tags_text,
+        match_singular_plural=match_singular_plural,
+        min_prefix_words=min_prefix_words,
+    )
+    cleaned_key_set = {
+        key
+        for key in (_normalize_specificity_tag(tag) for tag in cleaned_result["cleaned_tags"])
+        if key
+    }
+
+    emitted_keys = set()
+    cleaned_parts: List[str] = []
+    for segment in segments:
+        if segment.get("type") == "weighted":
+            kept_tags: List[str] = []
+            local_seen = set()
+            for raw_tag in segment.get("tags", []):
+                tag = str(raw_tag or "").strip()
+                key = _normalize_specificity_tag(tag)
+                if not key or key not in cleaned_key_set or key in emitted_keys or key in local_seen:
+                    continue
+                local_seen.add(key)
+                emitted_keys.add(key)
+                kept_tags.append(tag)
+            weighted_text = _build_weighted_prompt_part(kept_tags, segment.get("weight", 1))
+            if weighted_text:
+                cleaned_parts.append(weighted_text)
+            continue
+
+        tag = str(segment.get("tag") or "").strip()
+        key = _normalize_specificity_tag(tag)
+        if not key or key not in cleaned_key_set or key in emitted_keys:
+            continue
+        emitted_keys.add(key)
+        cleaned_parts.append(_escape_unescaped_parentheses(tag))
+
+    escaped_removed_tags = [
+        _escape_unescaped_parentheses(tag)
+        for tag in cleaned_result["removed_tags"]
+        if str(tag or "").strip()
+    ]
+    return {
+        "cleaned_tags": cleaned_parts,
         "removed_tags": escaped_removed_tags,
-        "cleaned_prompt": _join_tag_text(escaped_cleaned_tags, keep_trailing_comma=keep_trailing_comma),
+        "cleaned_prompt": _join_tag_text(cleaned_parts, keep_trailing_comma=keep_trailing_comma),
         "removed_prompt": _join_tag_text(escaped_removed_tags, keep_trailing_comma=False),
     }
 
 
 def _merge_tag_prompt_texts(tag_texts: List[str], keep_trailing_comma: bool = False) -> str:
-    merged_tags: List[str] = []
-    seen = set()
+    merged_parts: List[str] = []
+    seen_plain = set()
+    seen_weighted = set()
 
     for tag_text in tag_texts:
-        for tag in _parse_tag_text_block(str(tag_text or "")):
+        for segment in _parse_prompt_segments(str(tag_text or "")):
+            if segment.get("type") == "weighted":
+                group_tags: List[str] = []
+                group_keys: List[str] = []
+                local_seen = set()
+                for raw_tag in segment.get("tags", []):
+                    tag = str(raw_tag or "").strip()
+                    key = _normalize_specificity_tag(tag)
+                    if not key or key in local_seen:
+                        continue
+                    local_seen.add(key)
+                    group_keys.append(key)
+                    group_tags.append(tag)
+                if not group_tags:
+                    continue
+                weight_text = _format_prompt_weight(segment.get("weight", 1))
+                signature = f"{weight_text}|{'|'.join(group_keys)}"
+                if signature in seen_weighted:
+                    continue
+                seen_weighted.add(signature)
+                merged_parts.append(_build_weighted_prompt_part(group_tags, weight_text))
+                continue
+
+            tag = str(segment.get("tag") or "").strip()
             escaped_tag = _escape_unescaped_parentheses(tag)
             key = _normalize_specificity_tag(escaped_tag)
-            if not key or key in seen:
+            if not key or key in seen_plain:
                 continue
-            seen.add(key)
-            merged_tags.append(escaped_tag)
+            seen_plain.add(key)
+            merged_parts.append(escaped_tag)
 
-    return _join_tag_text(merged_tags, keep_trailing_comma=keep_trailing_comma)
-
+    return _join_tag_text(merged_parts, keep_trailing_comma=keep_trailing_comma)
 
 def _extract_tags_text_from_payload(raw_value: Any, depth: int = 0) -> str:
     if depth > 3:
@@ -733,14 +999,18 @@ def _select_from_bundle(
     tag_bundle: Dict[str, Any],
     selected_tags_json: Any,
     selected_categories_json: Any,
+    manual_category_tags_json: Any,
+    selected_category_weights_json: Any,
     separator: str,
     use_all_when_empty: bool,
     deduplicate_selected: bool,
     keep_trailing_comma: bool,
 ):
     normalized_bundle = _normalize_bundle_for_ui(tag_bundle)
+    working_bundle = _merge_manual_tags_into_bundle(normalized_bundle, manual_category_tags_json)
     selected_list = _safe_parse_json_list(selected_tags_json, [])
     selected_categories = _safe_parse_json_list(selected_categories_json, [])
+    selected_category_weights = _safe_parse_json_weight_map(selected_category_weights_json)
     use_all_when_empty = _as_bool(use_all_when_empty, True)
     deduplicate_selected = _as_bool(deduplicate_selected, True)
     normalized_separator = str(separator or "comma").strip()
@@ -753,61 +1023,140 @@ def _select_from_bundle(
 
     available_map: Dict[str, str] = {}
     all_tags: List[str] = []
-    for _, tags in normalized_bundle.items():
+    tag_category_map: Dict[str, str] = {}
+    for category, tags in working_bundle.items():
         for tag in tags:
-            key = tag.lower()
+            key = _unescape_comfy_parentheses(tag).strip().lower()
+            if not key:
+                continue
             if key not in available_map:
                 available_map[key] = tag
                 all_tags.append(tag)
+            if key not in tag_category_map:
+                tag_category_map[key] = category
 
     category_name_map: Dict[str, str] = {}
-    for category in normalized_bundle.keys():
+    for category in working_bundle.keys():
         normalized_key = str(category).strip().lower()
         if normalized_key and normalized_key not in category_name_map:
             category_name_map[normalized_key] = category
 
     resolved_categories: List[str] = []
+    seen_categories = set()
     for category in selected_categories:
         normalized_key = str(category).strip().lower()
-        if normalized_key in category_name_map:
-            resolved_categories.append(category_name_map[normalized_key])
+        resolved_category = category_name_map.get(normalized_key)
+        if not resolved_category or normalized_key in seen_categories:
+            continue
+        seen_categories.add(normalized_key)
+        resolved_categories.append(resolved_category)
 
-    if selected_list:
-        merged_tags = []
-        for item in selected_list:
-            normalized_item = _unescape_comfy_parentheses(item).strip().lower()
-            if normalized_item in available_map:
-                merged_tags.append(available_map[normalized_item])
+    resolved_category_weights: Dict[str, float] = {}
+    for raw_category, weight in selected_category_weights.items():
+        normalized_key = str(raw_category).strip().lower()
+        resolved_category = category_name_map.get(normalized_key)
+        if not resolved_category:
+            continue
+        resolved_category_weights[resolved_category] = weight
+
+    category_order: List[str] = []
+    seen_category_order = set()
+    for category in resolved_categories:
+        normalized_key = category.strip().lower()
+        if normalized_key in seen_category_order:
+            continue
+        seen_category_order.add(normalized_key)
+        category_order.append(category)
+
+    selected_tag_keys = set()
+    fallback_tags: List[str] = []
+    for item in selected_list:
+        normalized_item = _unescape_comfy_parentheses(item).strip().lower()
+        if not normalized_item:
+            continue
+        selected_tag_keys.add(normalized_item)
+        resolved_tag = available_map.get(normalized_item)
+        if resolved_tag is None:
+            fallback_tag = _escape_unescaped_parentheses(str(item).strip())
+            if fallback_tag:
+                fallback_tags.append(fallback_tag)
+            continue
+        resolved_category = tag_category_map.get(normalized_item)
+        if not resolved_category:
+            continue
+        category_key = resolved_category.strip().lower()
+        if category_key not in seen_category_order:
+            seen_category_order.add(category_key)
+            category_order.append(resolved_category)
+
+    selected_parts: List[str] = []
+    if selected_list or category_order:
+        explicit_category_keys = {category.strip().lower() for category in resolved_categories}
+        used_tag_keys = set()
+        for category in category_order:
+            category_tags = list(working_bundle.get(category, []))
+            row_source: List[str] = []
+            if selected_tag_keys:
+                for tag in category_tags:
+                    normalized_tag = _unescape_comfy_parentheses(tag).strip().lower()
+                    if normalized_tag in selected_tag_keys:
+                        row_source.append(tag)
+            if not row_source and category.strip().lower() in explicit_category_keys:
+                row_source = category_tags
+
+            row_tags: List[str] = []
+            row_seen = set()
+            for tag in row_source:
+                escaped_tag = _escape_unescaped_parentheses(str(tag).strip())
+                if not escaped_tag:
+                    continue
+                normalized_tag = _unescape_comfy_parentheses(escaped_tag).strip().lower()
+                if not normalized_tag or normalized_tag in row_seen:
+                    continue
+                if deduplicate_selected and normalized_tag in used_tag_keys:
+                    continue
+                row_seen.add(normalized_tag)
+                if deduplicate_selected:
+                    used_tag_keys.add(normalized_tag)
+                row_tags.append(escaped_tag)
+
+            if not row_tags:
+                continue
+
+            row_text = ", ".join(row_tags)
+            row_weight = resolved_category_weights.get(category, 1.0)
+            if abs(float(row_weight) - 1.0) > 1e-9:
+                selected_parts.append(f"({row_text}:{_format_prompt_weight(row_weight)})")
             else:
-                fallback_tag = _escape_unescaped_parentheses(str(item).strip())
-                if fallback_tag:
-                    merged_tags.append(fallback_tag)
-    elif resolved_categories:
-        merged_tags = []
-        for category in resolved_categories:
-            merged_tags.extend(normalized_bundle.get(category, []))
-    elif use_all_when_empty:
-        merged_tags = list(all_tags)
-    else:
-        merged_tags = []
+                selected_parts.append(row_text)
 
-    if merged_tags:
-        merged_tags = [
+        fallback_seen = set()
+        for tag in fallback_tags:
+            normalized_tag = _unescape_comfy_parentheses(tag).strip().lower()
+            if not normalized_tag or normalized_tag in fallback_seen:
+                continue
+            if deduplicate_selected and normalized_tag in used_tag_keys:
+                continue
+            fallback_seen.add(normalized_tag)
+            if deduplicate_selected:
+                used_tag_keys.add(normalized_tag)
+            selected_parts.append(tag)
+    elif use_all_when_empty:
+        selected_parts = [
             _escape_unescaped_parentheses(str(tag).strip())
-            for tag in merged_tags
+            for tag in all_tags
             if str(tag).strip()
         ]
-
-    if deduplicate_selected and merged_tags:
-        seen = set()
-        deduplicated = []
-        for tag in merged_tags:
-            key = _unescape_comfy_parentheses(tag).lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            deduplicated.append(tag)
-        merged_tags = deduplicated
+        if deduplicate_selected and selected_parts:
+            seen = set()
+            deduplicated = []
+            for tag in selected_parts:
+                key = _unescape_comfy_parentheses(tag).strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                deduplicated.append(tag)
+            selected_parts = deduplicated
 
     sep_map = {
         "comma": ", ",
@@ -815,7 +1164,7 @@ def _select_from_bundle(
         "space": " ",
     }
     joiner = sep_map.get(normalized_separator, ", ")
-    selected_text = joiner.join(merged_tags) if merged_tags else ""
+    selected_text = joiner.join(selected_parts) if selected_parts else ""
 
     if selected_text and keep_trailing:
         if normalized_separator == "newline":
@@ -826,7 +1175,6 @@ def _select_from_bundle(
             selected_text += ", "
 
     return selected_text, normalized_bundle
-
 
 def _empty_image_tensor() -> torch.Tensor:
     return torch.zeros(1, 1, 1, 3)
@@ -884,7 +1232,7 @@ def _cleanup_expired_cache_items(cache_dict: Dict[str, Any], ttl_seconds: int):
         cache_dict.pop(key, None)
 
 
-def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "all") -> List[Dict[str, Any]]:
+def _fetch_gallery_posts(tags: str, limit: int, page: int, rating: str = "safe") -> List[Dict[str, Any]]:
     allowed_image_ext = {"jpg", "jpeg", "png", "webp", "bmp", "tiff", "tif"}
     rating_value = str(rating or "all").strip().lower()
     tag_parts = [str(tags or "").strip()]
@@ -1321,6 +1669,7 @@ class DanbooruTagSorterSelectorNode:
                 "selected_tags_json": ("STRING", {"default": "[]", "multiline": True}),
                 "selected_categories_json": ("STRING", {"default": "[]", "multiline": True}),
                 "manual_category_tags_json": ("STRING", {"default": "{}", "multiline": True}),
+                "selected_category_weights_json": ("STRING", {"default": "{}", "multiline": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1354,6 +1703,7 @@ class DanbooruTagSorterSelectorNode:
         selected_tags_json="[]",
         selected_categories_json="[]",
         manual_category_tags_json="{}",
+        selected_category_weights_json="{}",
         unique_id=None,
     ):
         all_str, cat_dict, _, _, _ = _execute_sorting(
@@ -1374,6 +1724,8 @@ class DanbooruTagSorterSelectorNode:
             tag_bundle=cat_dict,
             selected_tags_json=selected_tags_json,
             selected_categories_json=selected_categories_json,
+            manual_category_tags_json=manual_category_tags_json,
+            selected_category_weights_json=selected_category_weights_json,
             separator=separator,
             use_all_when_empty=use_all_when_empty,
             deduplicate_selected=deduplicate_selected,
@@ -1743,7 +2095,7 @@ if PromptServer is not None and web is not None:
         async def get_posts_for_gallery(request):
             try:
                 tags = str(request.query.get("tags", "")).strip()
-                rating = str(request.query.get("rating", "all")).strip().lower()
+                rating = str(request.query.get("rating", "safe")).strip().lower()
 
                 try:
                     limit = int(request.query.get("limit", 20))
