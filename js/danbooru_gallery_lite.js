@@ -3,6 +3,28 @@ import { api } from "/scripts/api.js";
 
 const EXT_NAME = "Comfy.DanbooruTagGalleryLite";
 const STYLE_ID = "dtg-lite-style";
+const CATEGORY_KEYS = ["artist", "copyright", "character", "general", "meta"];
+const DEFAULT_PROMPT_CATEGORIES = ["artist", "copyright", "character", "general"];
+const LEGACY_PROMPT_CATEGORIES = ["copyright", "character", "general"];
+const CATEGORY_LABELS = {
+    artist: "Artist",
+    copyright: "Copyright",
+    character: "Character",
+    general: "General",
+    meta: "Meta",
+};
+const PROMPT_FILTER_TAGS = new Set([
+    "watermark",
+    "sample_watermark",
+    "weibo_username",
+    "weibo",
+    "weibo_logo",
+    "weibo_watermark",
+    "censored",
+    "mosaic_censoring",
+    "artist_name",
+    "twitter_username",
+]);
 
 function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;
@@ -199,6 +221,68 @@ function injectStyle() {
             color: #bdbdbd;
             font-size: 11px;
         }
+        .dtg-tooltip {
+            position: fixed;
+            z-index: 99999;
+            display: none;
+            pointer-events: none;
+            width: min(560px, calc(100vw - 16px));
+            max-width: calc(100vw - 16px);
+            max-height: none;
+            overflow: visible;
+            padding: 10px;
+            border: 1px solid rgba(117, 150, 196, .46);
+            border-radius: 10px;
+            background: linear-gradient(180deg, rgba(11, 16, 25, .98), rgba(18, 26, 39, .98));
+            box-shadow: 0 14px 34px rgba(0, 0, 0, .42);
+            color: #edf4ff;
+            box-sizing: border-box;
+        }
+        .dtg-tooltip-head {
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(108, 134, 168, .28);
+        }
+        .dtg-tooltip-title {
+            margin: 0 0 5px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #f4f8ff;
+        }
+        .dtg-tooltip-prompt {
+            font-size: 11px;
+            line-height: 1.5;
+            color: #dbe8fb;
+            word-break: break-word;
+        }
+        .dtg-tooltip-section {
+            margin-top: 8px;
+        }
+        .dtg-tooltip-section-head {
+            margin-bottom: 5px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #8fc0ff;
+            letter-spacing: .15px;
+            text-transform: uppercase;
+        }
+        .dtg-tooltip-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .dtg-tooltip-tag {
+            display: inline-flex;
+            align-items: center;
+            min-height: 22px;
+            padding: 2px 7px;
+            border: 1px solid rgba(101, 132, 173, .38);
+            border-radius: 999px;
+            background: rgba(34, 52, 79, .62);
+            color: #edf5ff;
+            font-size: 11px;
+            line-height: 1.3;
+        }
         .dtg-empty {
             border: 1px dashed #3d3d3d;
             border-radius: 8px;
@@ -382,20 +466,68 @@ function parseTagString(tagString) {
         .filter(Boolean);
 }
 
+function humanizeTag(tag) {
+    return String(tag || "").replaceAll("_", " ").trim();
+}
+
+function normalizeSelectedCategories(rawCategories, version = 0) {
+    const deduped = [];
+    const seen = new Set();
+    if (Array.isArray(rawCategories)) {
+        rawCategories.forEach(value => {
+            const key = String(value || "").trim().toLowerCase();
+            if (!CATEGORY_KEYS.includes(key) || seen.has(key)) return;
+            seen.add(key);
+            deduped.push(key);
+        });
+    }
+
+    if (!deduped.length) {
+        return [...DEFAULT_PROMPT_CATEGORIES];
+    }
+
+    const isLegacyDefault =
+        Number(version || 0) < 2 &&
+        deduped.length === LEGACY_PROMPT_CATEGORIES.length &&
+        LEGACY_PROMPT_CATEGORIES.every(key => deduped.includes(key));
+    if (isLegacyDefault) {
+        return [...DEFAULT_PROMPT_CATEGORIES];
+    }
+    return deduped;
+}
+
+function getCategorizedTooltipTags(postData) {
+    const sections = {};
+    CATEGORY_KEYS.forEach(category => {
+        const tags = [];
+        const seen = new Set();
+        parseTagString(postData?.[`tag_string_${category}`]).forEach(tag => {
+            const raw = String(tag || "").trim();
+            const key = raw.toLowerCase();
+            if (!raw || seen.has(key) || PROMPT_FILTER_TAGS.has(key)) return;
+            seen.add(key);
+            tags.push(raw);
+        });
+        sections[category] = tags;
+    });
+
+    if (CATEGORY_KEYS.every(category => !sections[category].length)) {
+        const fallback = [];
+        const seen = new Set();
+        parseTagString(postData?.tag_string).forEach(tag => {
+            const raw = String(tag || "").trim();
+            const key = raw.toLowerCase();
+            if (!raw || seen.has(key) || PROMPT_FILTER_TAGS.has(key)) return;
+            seen.add(key);
+            fallback.push(raw);
+        });
+        sections.general = fallback;
+    }
+    return sections;
+}
+
 function buildPromptLikeReference(postData, selectedCategories) {
-    const filterTags = new Set([
-        "watermark",
-        "sample_watermark",
-        "weibo_username",
-        "weibo",
-        "weibo_logo",
-        "weibo_watermark",
-        "censored",
-        "mosaic_censoring",
-        "artist_name",
-        "twitter_username",
-    ]);
-    const categories = Array.isArray(selectedCategories) ? selectedCategories : [];
+    const categories = normalizeSelectedCategories(selectedCategories, 2);
     const outputTags = [];
 
     categories.forEach(category => {
@@ -412,11 +544,11 @@ function buildPromptLikeReference(postData, selectedCategories) {
     const seen = new Set();
     tagsToProcess.forEach(tag => {
         const key = String(tag || "").trim().toLowerCase();
-        if (!key || seen.has(key) || filterTags.has(key)) return;
+        if (!key || seen.has(key) || PROMPT_FILTER_TAGS.has(key)) return;
         seen.add(key);
         deduped.push(tag);
     });
-    return deduped.map(tag => String(tag).replaceAll("_", " ")).join(", ");
+    return deduped.map(humanizeTag).join(", ");
 }
 
 function toPrompt(tagString) {
@@ -451,6 +583,97 @@ function normalizePost(raw) {
         tag_string_meta: String(post.tag_string_meta ?? ""),
         prompt: String(post.prompt ?? "") || toPrompt(post.tag_string),
     };
+}
+
+function ensureTooltip(state) {
+    if (state.tooltipEl?.isConnected) return state.tooltipEl;
+
+    const tooltip = document.createElement("div");
+    tooltip.className = "dtg-tooltip";
+    document.body.appendChild(tooltip);
+    state.tooltipEl = tooltip;
+    return tooltip;
+}
+
+function positionTooltip(tooltip, event) {
+    if (!tooltip || !event) return;
+    const buffer = 16;
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+    tooltip.style.display = "block";
+
+    const rect = tooltip.getBoundingClientRect();
+    let left = event.clientX + buffer;
+    let top = event.clientY + buffer;
+    if (left + rect.width > window.innerWidth - 8) {
+        left = Math.max(8, event.clientX - rect.width - buffer);
+    }
+    if (top + rect.height > window.innerHeight - 8) {
+        top = Math.max(8, event.clientY - rect.height - buffer);
+    }
+
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+}
+
+function renderTooltipContent(state, post) {
+    const tooltip = ensureTooltip(state);
+    tooltip.innerHTML = "";
+
+    const head = document.createElement("div");
+    head.className = "dtg-tooltip-head";
+    const title = document.createElement("div");
+    title.className = "dtg-tooltip-title";
+    title.textContent = `#${post.id || "?"} Prompt`;
+    const prompt = document.createElement("div");
+    prompt.className = "dtg-tooltip-prompt";
+    prompt.textContent = buildPromptLikeReference(post, state.getSelectedCategories()) || post.prompt || "(empty prompt)";
+    head.appendChild(title);
+    head.appendChild(prompt);
+    tooltip.appendChild(head);
+
+    const sections = getCategorizedTooltipTags(post);
+    CATEGORY_KEYS.forEach(category => {
+        const tags = sections[category] || [];
+        if (!tags.length) return;
+
+        const section = document.createElement("div");
+        section.className = "dtg-tooltip-section";
+        const header = document.createElement("div");
+        header.className = "dtg-tooltip-section-head";
+        header.textContent = CATEGORY_LABELS[category] || category;
+        const tagsWrap = document.createElement("div");
+        tagsWrap.className = "dtg-tooltip-tags";
+        tags.forEach(tag => {
+            const pill = document.createElement("span");
+            pill.className = "dtg-tooltip-tag";
+            pill.textContent = humanizeTag(tag);
+            tagsWrap.appendChild(pill);
+        });
+        section.appendChild(header);
+        section.appendChild(tagsWrap);
+        tooltip.appendChild(section);
+    });
+
+    return tooltip;
+}
+
+function hideTooltip(state) {
+    if (state.tooltipEl) {
+        state.tooltipEl.style.display = "none";
+    }
+    state.hoveredPostId = "";
+}
+
+function moveTooltip(state, event) {
+    if (!state?.tooltipEl || state.tooltipEl.style.display === "none") return;
+    positionTooltip(state.tooltipEl, event);
+}
+
+function showTooltip(state, post, event) {
+    const tooltip = renderTooltipContent(state, post);
+    state.hoveredPostId = String(post?.id || "");
+    positionTooltip(tooltip, event);
 }
 
 function syncSelectionWidget(node, selectionWidget, selectedMap) {
@@ -591,7 +814,7 @@ app.registerExtension({
                 const checkbox = document.createElement("input");
                 checkbox.type = "checkbox";
                 checkbox.value = key;
-                checkbox.checked = ["copyright", "character", "general"].includes(key);
+                checkbox.checked = DEFAULT_PROMPT_CATEGORIES.includes(key);
                 categoryCheckboxes.set(key, checkbox);
                 label.appendChild(checkbox);
                 label.appendChild(document.createTextNode(key));
@@ -676,7 +899,10 @@ app.registerExtension({
                 scrollTimer: null,
                 pendingScrollTop: 0,
                 syncGridLayout: null,
+                tooltipEl: null,
+                hoveredPostId: "",
             };
+            state.getSelectedCategories = getSelectedCategories;
             this.__dtgState = state;
 
             const originalOnResize = this.onResize;
@@ -727,11 +953,11 @@ app.registerExtension({
 
             function getSelectedCategories() {
                 const selected = [];
-                ["artist", "copyright", "character", "general", "meta"].forEach(key => {
+                CATEGORY_KEYS.forEach(key => {
                     const cb = state.categoryCheckboxes.get(key);
                     if (cb?.checked) selected.push(key);
                 });
-                return selected.length ? selected : ["copyright", "character", "general"];
+                return selected.length ? selected : [...DEFAULT_PROMPT_CATEGORIES];
             }
 
             function syncStateWidget(includePosts = false) {
@@ -742,6 +968,7 @@ app.registerExtension({
                     page: Math.max(1, Number(state.page || 1)),
                     scroll_top: Math.max(0, Number(state.grid.scrollTop || 0)),
                     selected_categories: getSelectedCategories(),
+                    selected_categories_version: 2,
                 };
                 setWidgetValue(state.stateWidget, JSON.stringify(payload));
                 if (includePosts) {
@@ -997,7 +1224,9 @@ app.registerExtension({
                     card.appendChild(thumbWrap);
                     card.appendChild(checkBadge);
                     card.appendChild(meta);
-                    card.title = buildPromptLikeReference(post, selectedCategories) || post.prompt || "(empty prompt)";
+                    thumbWrap.addEventListener("mouseenter", event => showTooltip(state, post, event));
+                    thumbWrap.addEventListener("mousemove", event => moveTooltip(state, event));
+                    thumbWrap.addEventListener("mouseleave", () => hideTooltip(state));
 
                     card.onclick = () => {
                         const alreadySelected = state.selectedMap.has(post.id);
@@ -1126,10 +1355,11 @@ app.registerExtension({
             });
 
             const uiState = parseJsonObject(stateWidget?.value, {});
-            const restoredCategories = Array.isArray(uiState.selected_categories)
-                ? uiState.selected_categories.map(x => String(x || "")).filter(Boolean)
-                : ["copyright", "character", "general"];
-            ["artist", "copyright", "character", "general", "meta"].forEach(key => {
+            const restoredCategories = normalizeSelectedCategories(
+                uiState.selected_categories,
+                uiState.selected_categories_version || 0
+            );
+            CATEGORY_KEYS.forEach(key => {
                 const cb = categoryCheckboxes.get(key);
                 if (cb) cb.checked = restoredCategories.includes(key);
             });
@@ -1214,6 +1444,12 @@ app.registerExtension({
             categoryCheckboxes.forEach(checkbox => {
                 checkbox.addEventListener("change", () => {
                     updateSelectedPromptsByCategory();
+                    if (state.hoveredPostId) {
+                        const hoveredPost = state.posts.find(post => String(post.id || "") === state.hoveredPostId);
+                        if (hoveredPost) {
+                            renderTooltipContent(state, hoveredPost);
+                        }
+                    }
                     renderPosts();
                     syncStateWidget(false);
                 });
@@ -1224,6 +1460,7 @@ app.registerExtension({
             });
             root.addEventListener("mouseleave", () => {
                 closeSuggest();
+                hideTooltip(state);
             });
 
             renderPosts();
@@ -1232,6 +1469,16 @@ app.registerExtension({
                 syncStateWidget(false);
             }
             return result;
+        };
+
+        const onRemoved = nodeType.prototype.onRemoved;
+        nodeType.prototype.onRemoved = function () {
+            const state = this.__dtgState;
+            if (state?.tooltipEl) {
+                state.tooltipEl.remove();
+                state.tooltipEl = null;
+            }
+            onRemoved?.apply(this, arguments);
         };
 
         const onConfigure = nodeType.prototype.onConfigure;
@@ -1256,10 +1503,11 @@ app.registerExtension({
             state.limitInput.value = String(limit);
             state.page = Math.max(1, Number(uiState.page || 1));
             state.pendingScrollTop = Math.max(0, Number(uiState.scroll_top || 0));
-            const restoredCategories = Array.isArray(uiState.selected_categories)
-                ? uiState.selected_categories.map(x => String(x || "")).filter(Boolean)
-                : ["copyright", "character", "general"];
-            ["artist", "copyright", "character", "general", "meta"].forEach(key => {
+            const restoredCategories = normalizeSelectedCategories(
+                uiState.selected_categories,
+                uiState.selected_categories_version || 0
+            );
+            CATEGORY_KEYS.forEach(key => {
                 const cb = state.categoryCheckboxes.get(key);
                 if (cb) cb.checked = restoredCategories.includes(key);
             });
